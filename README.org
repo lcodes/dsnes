@@ -1,0 +1,77 @@
+* Emulator
+
+  An emulator written in the [[https://dlang.org][D programming language]].
+
+  For more information, [https://github.com/lcodes/demu/wiki][see the wiki section]].
+
+*** TODO missing links
+*** TODO status badges
+
+** For the impatient
+
+*** TODO write this section
+
+** Description
+
+   For the most part, this is a rewrite of Higan in D.
+
+   The following libraries are used:
+
+   - SDL2 :: Backend for the input, audio and video systems.
+   - OpenGL :: Framebuffer and post-process effects.
+   - Lua :: Scripting, most high-level native code is exposed.
+   - Dear IMGUI :: Immediate-mode GUI, available to scripts.
+   - libnfd :: Native file dialogs. (ex: open/save file)
+   - linenoise :: Used to enter commands at the console.
+
+*** TODO write this section
+
+** History
+
+   The project started when I wanted to learn more about SNES assembly, shortly
+   after deciding I also wanted to understand the hardware. This had quickly
+   escalated to me thinking "writing an emulator, how hard can it be?"
+
+   Pretty darn hard it turns out.
+
+   After looking at 65816 references and the sources of bsnes, snes9x and zsnes
+   while trying to put something together, I quickly had something that could
+   more or less load a simple LoROM image. It wasn't long before I discovered
+   about properly executing instructions on multiple chips simultaneously...
+
+   Also I found about Higan, the new name for bsnes as a multi-platform emulator.
+   Since I mostly want to learn, I decided it would be a fun challenge to port
+   it to the D language.
+
+** Installers
+
+*** TODO homebrew script
+*** TODO dmg archive + macOS application
+*** TODO deb package + linux application
+*** TODO rpm package + linux application
+*** TODO msi package + win32 application
+*** TODO zip archive + win32 application
+
+** Building from sources
+
+*** TODO write this section
+
+*** Linux and macOS
+*** Windows
+*** Android
+*** iOS
+
+** Uninstalling
+
+*** TODO write this section
+
+** Resources
+
+*** TODO write this section
+
+** References
+
+*** TODO write this section
+
+*** Higan
+*** SNES Documentation
