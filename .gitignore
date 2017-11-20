@@ -1,0 +1,35 @@
+# FIXME: do something with these
+build/
+fonts/
+scripts/
+init.lua
+
+# Application
+bin/
+lib/
+files/
+imgui.ini
+
+# C/C++/D
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.exe
+*.lst
+
+# DUB
+.dub
+docs.json
+__dummy.html
+docs/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+[Dd]esktop.ini
+*.lnk
