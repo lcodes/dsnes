@@ -1,0 +1,26 @@
+name        "emulator"
+description "An emulator."
+authors     "Jeremie Pelletier <jeremiep+emulator@gmail.com>"
+copyright   "Copyright © 2017, Jeremie Pelletier"
+license     "TDB"
+
+dependency "dimgui"        version="~master"
+dependency "derelict-gl3"  version="~>2.0.0-beta.4"
+dependency "derelict-lua"  version="~>2.0.0-beta.2"
+dependency "derelict-sdl2" version="~>3.1.0-alpha.2"
+dependency "linenoise"     version="~>1.0.0"
+
+targetPath "bin"
+
+libs "nfd" "linenoise"
+
+lflags "-Llib"
+lflags "-framework" "Cocoa" platform="osx"
+
+buildType "debug" {
+  buildRequirements "allowWarnings"
+}
+
+buildType "release" {
+  buildOptions "releaseMode" "optimize" "inline" "debugInfo" "noBoundsCheck"
+}
