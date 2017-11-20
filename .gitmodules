@@ -1,3 +1,6 @@
 [submodule "linenoise"]
 	path = vendor/linenoise
 	url = https://github.com/antirez/linenoise
+[submodule "nativefiledialog"]
+	path = vendor/nativefiledialog
+	url = https://github.com/mlabbe/nativefiledialog
