@@ -1,74 +1,107 @@
+/**
+ *
+ */
 module emulator.audio;
 
-import std.conv : to;
+import std.conv      : text, to;
+import std.exception : enforce;
 
-import derelict.sdl2.sdl;
+import derelict.openal;
 
-import emulator.util : dispose, sdlRaise;
+import emulator.profiler : Profile;
+import emulator.util : cstring, dispose;
 
 import console = emulator.console;
 
+// Audio state
+// -----------------------------------------------------------------------------
+
 private __gshared {
-  SDL_AudioSpec spec;
-  SDL_AudioDeviceID dev;
+  ALCdevice*  device;
+  ALCcontext* context;
+
+  Settings settings;
+
+  struct Settings {
+    cstring device;
+  }
 }
+
+// Lifecycle
+// -----------------------------------------------------------------------------
 
 package:
 
 void initialize() {
   console.trace("Initialize");
+  assert(!DerelictAL.isLoaded);
 
-  foreach (n; 0 .. SDL_GetNumAudioDrivers()) {
-    console.verbose("Audio Driver: #", n, " ", SDL_GetAudioDriver(n).to!string);
+  DerelictAL.load();
+
+  if (alcIsExtensionPresent(null, "ALC_ENUMERATION_EXT")) {
+    auto list = alcGetString(null, ALC_DEVICE_SPECIFIER);
+    do {
+      auto dev = list.to!string;
+      list += dev.length + 1;
+
+      console.verbose("Detected device: ", dev);
+    } while (*list);
   }
 
-  foreach (n; 0 .. SDL_GetNumAudioDevices(0)) {
-    console.verbose("Audio Device: #", n, " ", SDL_GetAudioDeviceName(n, 0).to!string);
+  device = alcOpenDevice(settings.device);
+  if (!device && settings.device) {
+    device = alcOpenDevice(null);
+    enforce(device, "Failed to open device");
+
+    console.warn("Requested device '", settings.device, "' was not found. ",
+                 "Falling back to using the default device.");
   }
 
-  SDL_AudioSpec want;
-  want.freq     = 48_000;
-  want.format   = AUDIO_F32;
-  want.channels = 2;
-  want.samples  = 4096;
-  want.callback = &callback;
+  console.verbose("Using device: ", device.alcGetString(ALC_DEVICE_SPECIFIER));
 
-  import emulator.util;
-  auto s = SDL_LoadWAV("files/a.wav", &want, &buf, &len).sdlCheck;
-  s.callback = &callback;
+  context = device.alcCreateContext(null);
+  enforce(context, "Failed to create device context");
 
-  // dev = SDL_OpenAudioDevice("HDMI", 0, s, &spec, 0);
-  // if (dev == 0) sdlRaise();
-
-  // SDL_PauseAudioDevice(dev, false);
-}
-
-__gshared { // XXX:
-  ubyte* buf;
-  uint len;
+  context.alcMakeContextCurrent();
+  alCheck();
 }
 
 void terminate() {
   console.trace("Terminate");
 
-  if (DerelictSDL2.isLoaded) {
-    dev.dispose!SDL_CloseAudioDevice();
+  if (DerelictAL.isLoaded) {
+    alcMakeContextCurrent(null);
+
+    context.dispose!alcDestroyContext;
+    device .dispose!alcCloseDevice;
+
+    DerelictAL.unload();
   }
 }
 
 void run() {
+  scope auto p = new Profile!();
 
 }
 
-uint pos;
-nothrow:
+private:
 
-extern (C) void callback(void* userData, ubyte* stream, int length) {
-  if (len == 0) return;
-  length = length > len ? len : length;
-  stream[0..length] = buf[pos..pos+length];
-  // SDL_MixAudioFormat(stream, buf + pos, spec.format, length, SDL_MIX_MAXVOLUME / 2);
+// Utilities
+// -----------------------------------------------------------------------------
 
-  pos += length;
-  len -= length;
+void alCheck(uint line = __LINE__)() {
+  auto e = alGetError();
+  if (e == AL_NO_ERROR) return;
+
+  string msg;
+  switch (e) {
+  default: assert(0, "Unknown AL error");
+  case AL_INVALID_NAME:      msg = "Invalid name";      break;
+  case AL_INVALID_ENUM:      msg = "Invalid enum";      break;
+  case AL_INVALID_VALUE:     msg = "Invalid value";     break;
+  case AL_INVALID_OPERATION: msg = "Invalid operation"; break;
+  case AL_OUT_OF_MEMORY:     msg = "Out of memory";     break;
+  }
+
+  throw new Exception(text("AL: ", msg, "\n @ ", __FILE__, ":", line));
 }

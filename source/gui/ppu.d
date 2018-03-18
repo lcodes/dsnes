@@ -2,9 +2,9 @@ module gui.ppu;
 
 import imgui;
 
-import emulator.gui;
-
 import ppu = snes.ppu;
+
+import gui.layout : Window;
 
 class PpuWindow : Window {
   this() {

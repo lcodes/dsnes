@@ -1,10 +1,14 @@
+/**
+ * References:
+ *   https://gitlab.com/higan/higan/blob/master/higan/processor/spc700
+ *   https://gitlab.com/higan/higan/tree/master/higan/sfc/smp
+ */
 module snes.smp;
 
 import std.bitmanip : bitfields;
 
+import emulator.util : Reg16;
 import thread = emulator.thread;
-
-import emulator.types;
 
 import cpu = snes.cpu;
 import dsp = snes.dsp;
@@ -74,15 +78,16 @@ void terminate() {}
 void power() {
   proc = thread.create(&entry, 32040.0 * 768.0);
 
-  regs.pc.l = iplrom[62];
-  regs.pc.h = iplrom[63];
-  regs.a = 0x00;
-  regs.x = 0x00;
-  regs.y = 0x00;
-  regs.s = 0xef;
-  regs.p = 0x02;
+  PC = 0x0000;
+  YA = 0x0000;
+  X = 0x00;
+  S = 0xef;
+  P = 0x02;
 
-  // Randomize apuram
+  regs.wait = false;
+  regs.stop = false;
+
+  // TODO: Randomize apuram
   apuram[0x00f4] = 0x00;
   apuram[0x00f5] = 0x00;
   apuram[0x00f6] = 0x00;
@@ -119,6 +124,10 @@ void serialize() {
   assert(0);
 }
 
+bool synchronizing() nothrow @nogc {
+  return false; // TODO
+}
+
 private void entry() {
   debug (SMP) printf("smp.entry\n");
   while (true) {
@@ -130,7 +139,7 @@ private void entry() {
 nothrow @nogc:
 
 // Memory
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 ubyte readRAM(ushort addr) {
   if (addr >= 0xffc0 && io.iplromEnable) return iplrom[addr & 0x3f];
@@ -180,7 +189,7 @@ void writeBus(ushort addr, ubyte data) {
   default: break;
 
   case 0xf0: // TEST
-    if (regs.p.p) break; // Only valid when P flag is clear.
+    if (P.p) break; // Only valid when P flag is clear.
 
     io[0] = data;
     io.timerStep = (1 << io.clockSpeed) + (2 << io.timerSpeed);
@@ -278,7 +287,7 @@ ubyte readOP(ushort addr) {
 }
 
 // Timing
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 void step(uint clocks) {
   processor.step(clocks);
@@ -363,7 +372,7 @@ struct Timer(uint frequency) {
 }
 
 // SPC700 Processor
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 private __gshared {
   Registers regs;
@@ -373,990 +382,1066 @@ private __gshared {
 
 union Flags {
   ubyte data; alias data this;
-  mixin(bitfields!(bool, "c", 1,
-                   bool, "z", 1,
-                   bool, "i", 1,
-                   bool, "h", 1,
-                   bool, "b", 1,
-                   bool, "p", 1,
-                   bool, "v", 1,
-                   bool, "n", 1));
+  mixin(bitfields!(bool, "c", 1,   // Carry
+                   bool, "z", 1,   // Zero
+                   bool, "i", 1,   // Interrupt disable
+                   bool, "h", 1,   // Half-carry
+                   bool, "b", 1,   // Break
+                   bool, "p", 1,   // Page
+                   bool, "v", 1,   // Overflow
+                   bool, "n", 1)); // Negative
 }
 
 struct Registers {
   Reg16 pc;
-  union {
-    ushort ya;
-    struct { ubyte a, y; }
-  }
+  Reg16 ya;
   ubyte x, s;
   Flags p;
+
+  bool wait;
+  bool stop;
 }
 
 alias fps = ubyte function(ubyte);
 alias fpb = ubyte function(ubyte, ubyte);
 alias fpw = ushort function(ushort, ushort);
 
-ubyte readPC() {
-  return read(regs.pc++);
+ubyte fetch() {
+  return read(PC++);
 }
 
-ubyte readSP() {
-  return read(0x0100 | ++regs.s);
+ubyte load(ubyte addr) {
+  return read(P.p << 8 | addr);
 }
 
-void writeSP(ubyte data) {
-  return write(0x100 | regs.s--, data);
+void store(ubyte addr, ubyte data) {
+  write(P.p << 8 | addr, data);
 }
 
-ubyte readDP(ubyte addr) {
-  return read(regs.p.p << 8 | addr);
+ubyte pull() {
+  return read(0x0100 | ++S);
 }
 
-void writeDP(ubyte addr, ubyte data) {
-  write(regs.p.p << 8 | addr, data);
+void push(ubyte data) {
+  write(0x100 | S--, data);
 }
 
 // SPC700 Algorithms
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
-ubyte op_adc(ubyte x, ubyte y) {
-  auto r = x + y + regs.p.c;
-  regs.p.n = (r & 0x80) != 0;
-  regs.p.v = (~(x ^ y) & (x ^ r) & 0x80) != 0;
-  regs.p.h = ((x ^ y ^ r) & 0x10) != 0;
-  regs.p.z = cast(ubyte) r == 0;
-  regs.p.c = r > 0xff;
-  return cast(ubyte) r;
+ubyte adc(ubyte x, ubyte y) {
+  auto z = x + y + P.c;
+  P.c = z > 0xff;
+  P.z = cast(ubyte) z == 0;
+  P.h = ((x ^ y ^ z) & 0x10) != 0;
+  P.v = (~(x ^ y) & (x ^ z) & 0x80) != 0;
+  P.n = (z & 0x80) != 0;
+  return cast(ubyte) z;
 }
 
-ubyte op_and(ubyte x, ubyte y) {
+ubyte and(ubyte x, ubyte y) {
   x &= y;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_asl(ubyte x) {
-  regs.p.c = (x & 0x80) != 0;
+ubyte asl(ubyte x) {
+  P.c = (x & 0x80) != 0;
   x <<= 1;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_cmp(ubyte x, ubyte y) {
-  auto r = x - y;
-  regs.p.n = (r & 0x80) != 0;
-  regs.p.z = cast(ubyte) r == 0;
-  regs.p.c = r >= 0;
+ubyte cmp(ubyte x, ubyte y) {
+  auto z = x - y;
+  P.c = z >= 0;
+  P.z = cast(ubyte) z == 0;
+  P.n = (z & 0x80) != 0;
   return x;
 }
 
-ubyte op_dec(ubyte x) {
+ubyte dec(ubyte x) {
   x--;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_eor(ubyte x, ubyte y) {
+ubyte eor(ubyte x, ubyte y) {
   x ^= y;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_inc(ubyte x) {
+ubyte inc(ubyte x) {
   x++;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_ld(ubyte x, ubyte y) {
-  regs.p.n = (y & 0x80) != 0;
-  regs.p.z = y == 0;
+ubyte ld(ubyte x, ubyte y) {
+  P.z = y == 0;
+  P.n = (y & 0x80) != 0;
   return y;
 }
 
-ubyte op_lsr(ubyte x) {
-  regs.p.c = x & 0x01;
+ubyte lsr(ubyte x) {
+  P.c = x & 0x01;
   x >>= 1;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_or(ubyte x, ubyte y) {
+ubyte or(ubyte x, ubyte y) {
   x |= y;
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_rol(ubyte x) {
-  auto carry = regs.p.c;
-  regs.p.c = (x & 0x80) != 0;
+ubyte rol(ubyte x) {
+  auto carry = P.c;
+  P.c = (x & 0x80) != 0;
   x = cast(ubyte) ((x << 1) | carry);
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_ror(ubyte x) {
-  ubyte carry = regs.p.c << 7;
-  regs.p.c = x & 0x01;
+ubyte ror(ubyte x) {
+  ubyte carry = P.c << 7;
+  P.c = x & 0x01;
   x = carry | (x >> 1);
-  regs.p.n = (x & 0x80) != 0;
-  regs.p.z = x == 0;
+  P.z = x == 0;
+  P.n = (x & 0x80) != 0;
   return x;
 }
 
-ubyte op_sbc(ubyte x, ubyte y) {
-  return op_adc(x, ~y);
-}
-
-ubyte op_st(ubyte x, ubyte y) {
-  return y;
+ubyte sbc(ubyte x, ubyte y) {
+  return adc(x, ~y);
 }
 
 //
 
-ushort op_adw(ushort x, ushort y) {
-  ushort r;
-  regs.p.c = 0;
-  r  = op_adc(cast(ubyte) x, cast(ubyte) y);
-  r |= op_adc(x >> 8, y >> 8) << 8;
-  regs.p.z = r == 0;
-  return r;
+ushort adw(ushort x, ushort y) {
+  Reg16 z;
+  P.c = 0;
+  z.l = adc(cast(ubyte) x, cast(ubyte) y);
+  z.h = adc(x >> 8, y >> 8);
+  P.z = z == 0;
+  return z;
 }
 
-ushort op_cpw(ushort x, ushort y) {
-  auto r = x - y;
-  regs.p.n = (r & 0x8000) != 0;
-  regs.p.z = cast(ushort) r == 0;
-  regs.p.c = r >= 0;
+ushort cpw(ushort x, ushort y) {
+  auto z = x - y;
+  P.c = z >= 0;
+  P.z = cast(ushort) z == 0;
+  P.n = (z & 0x8000) != 0;
   return x;
 }
 
-ushort op_ldw(ushort x, ushort y) {
-  regs.p.n = (y & 0x8000) != 0;
-  regs.p.z = y == 0;
+ushort ldw(ushort x, ushort y) {
+  P.z = y == 0;
+  P.n = (y & 0x8000) != 0;
   return y;
 }
 
-ushort op_sbw(ushort x, ushort y) {
-  ushort r;
-  regs.p.c = 1;
-  r  = op_sbc(cast(ubyte) x, cast(ubyte) y);
-  r |= op_sbc(x >> 8, y >> 8) << 8;
-  regs.p.z = r == 0;
-  return r;
+ushort sbw(ushort x, ushort y) {
+  Reg16 z;
+  P.c = 1;
+  z.l = sbc(cast(ubyte) x, cast(ubyte) y);
+  z.h = sbc(x >> 8, y >> 8);
+  P.z = z == 0;
+  return z;
 }
 
 // SPC700 Instructions
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
-void op_adjust(alias op, alias r)() {
-  idle();
-  r = op(r);
-}
-
-void op_adjust_addr(alias op)() {
-  dp.l = readPC();
-  dp.h = readPC();
-  rd = read(dp);
-  rd = op(rd);
-  write(dp, rd);
-}
-
-void op_adjust_dp(alias op)() {
-  dp = readPC();
-  rd = readDP(dp);
-  rd = op(rd);
-  writeDP(dp, rd);
-}
-
-void op_adjust_dpw(int n)() {
-  dp = readPC();
-  rd.w = readDP(dp) + n;
-  writeDP(dp++, rd.l);
-  rd.h += readDP(dp);
-  writeDP(dp++, rd.h);
-  regs.p.n = rd & 0x8000;
-  regs.p.z = rd == 0;
-}
-
-void op_adjust_dpx(alias op)() {
-  dp = readPC();
-  idle();
-  rd = readDP(dp + regs.x);
-  rd = op(rd);
-  writeDP(dp + regs.x, rd);
-}
-
-void op_branch(bool condition)() {
-  rd = readPC();
-  if (!condition) return;
-  idle();
-  idle();
-  regs.pc += cast(byte) rd;
-}
-
-void op_branch_bit() {
-  dp = readPC();
-  sp = readDP(cast(ubyte) dp);
-  rd = readPC();
-  idle();
-  if (cast(bool) (sp & (1 << (opcode >> 5))) == cast(bool) (opcode & 0x10)) return;
-  idle();
-  idle();
-  regs.pc += cast(byte) rd;
-}
-
-void op_pull(alias r)() {
-  idle();
-  idle();
-  r = readSP();
-}
-
-void op_push(alias r)() {
-  idle();
-  idle();
-  writeSP(r);
-}
-
-void op_read_addr(alias op, alias r)() {
-  dp.l = readPC();
-  dp.h = readPC();
-  rd = read(dp);
-  r = op(r, rd);
-}
-
-auto op_read_addri(alias op, alias r)() {
-  dp.l = readPC();
-  dp.h = readPC();
-  idle();
-  rd = read(dp + r);
-  regs.a = op(regs.a, rd);
-}
-
-auto op_read_const(alias op, alias r)() {
-  rd = readPC();
-  r = op(r, rd);
-}
-
-auto op_read_dp(alias op, alias r)() {
-  dp = readPC();
-  rd = readDP(cast(ubyte) dp);
-  r = op(r, cast(ubyte) rd);
-}
-
-auto op_read_dpi(alias op, alias r, alias i)() {
-  dp = readPC();
-  idle();
-  rd = readDP(cast(ubyte) dp + i);
-  r = op(r, cast(ubyte) rd);
-}
-
-void op_read_dpw(alias op)() {
-  dp = readPC();
-  rd.l = readDP(dp++);
-  static if (!is(op == op_cpw)) idle();
-  rd.h = readDP(dp++);
-  regs.ya = op(regs.ya, rd);
-}
-
-void op_read_idpx(alias op)() {
-  dp = readPC() + regs.x;
-  idle();
-  sp.l = readDP(dp++);
-  sp.h = readDP(dp++);
-  rd = read(sp);
-  regs.a = op(regs.a, rd);
-}
-
-void op_read_idpy(alias op)() {
-  dp = readPC();
-  idle();
-  sp.l = readDP(dp++);
-  sp.h = readDP(dp++);
-  rd = read(sp + regs.y);
-  regs.a = op(regs.a, rd);
-}
-
-void op_read_ix(alias op)() {
-  idle();
-  rd = readDP(regs.x);
-  regs.a = op(regs.a, rd);
-}
-
-void op_set_addr_bit() {
-  dp.l = readPC();
-  dp.h = readPC();
-  bit = dp >> 13;
-  dp &= 0x1fff;
-  rd = read(dp);
-  final switch (opcode >> 5) {
-  case 0:  //orc  addr:bit
-  case 1:  //orc !addr:bit
+void absoluteBitModify(ubyte mode) {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  auto bit = address >> 13;
+  address &= 0x1fff;
+  auto data = read(address);
+  auto c = P.c;
+  auto b = data & (1 << bit);
+  final switch (mode) {
+  case 0:  //or  addr:bit
     idle();
-    regs.p.c = regs.p.c || (rd & (1 << bit)) ^ cast(bool) (opcode & 0x20);
+    c |= b != 0;
+    break;
+  case 1:  //or !addr:bit
+    idle();
+    c |= b == 0;
     break;
   case 2:  //and  addr:bit
+    c &= b != 0;
+    break;
   case 3:  //and !addr:bit
-    regs.p.c = regs.p.c & (rd & (1 << bit)) ^ cast(bool) (opcode & 0x20);
+    c &= b == 0;
     break;
   case 4:  //eor  addr:bit
     idle();
-    regs.p.c = regs.p.c ^ cast(bool) (rd & (1 << bit));
+    c ^= b != 0;
     break;
-  case 5:  //ldc  addr:bit
-    regs.p.c = cast(bool) (rd & (1 << bit));
+  case 5:  //ld  addr:bit
+    c = b != 0;
     break;
-  case 6:  //stc  addr:bit
+  case 6:  //st  addr:bit
     idle();
-    rd = cast(ushort) ((rd & ~(1 << bit)) | (regs.p.c << bit));
-    write(dp, cast(ubyte) rd);
+    write(dp, cast(ubyte) (P.c << bit));
     break;
   case 7:  //not  addr:bit
-    rd ^= 1 << bit;
-    write(dp, cast(ubyte) rd);
+    write(dp, cast(ubyte) (data ^= 1 << bit));
     break;
   }
+  P.c = c;
 }
 
-void op_set_bit() {
-  dp = readPC();
-  rd = readDP(cast(ubyte) dp) & ~(1 << (opcode >> 5));
-  writeDP(cast(ubyte) dp, cast(ubyte) (rd | (!(opcode & 0x10) << (opcode >> 5))));
+void absoluteBitSet(ubyte bit, bool value) {
+  auto addr = fetch();
+  auto data = load(addr);
+  if (value) data |= 1 << bit;
+  else data &= ~(1 << bit);
+  store(addr, data);
 }
 
-void op_set_flag(uint bit, bool value)() {
+void absoluteRead(alias op)(ref ubyte target) {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  auto data = read(address);
+  target = op(target, data);
+}
+
+void absoluteModify(alias op)() {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  auto data = read(address);
+  write(address, op(data));
+}
+
+void absoluteWrite(ubyte data) {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  read(address);
+  write(address, data);
+}
+
+void absoluteIndexedRead(alias op)(ubyte index) {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  address += index;
   idle();
-  if (bit == regs.p.i.bit) idle();
-  regs.p = value ? (regs.p | (1 << bit)) : (regs.p & ~(1 << bit));
+  auto data = read(address);
+  A = op(A, data);
 }
 
-void op_test_addr(bool set)() {
-  dp.l = readPC();
-  dp.h = readPC();
-  rd = read(dp);
-  regs.p.n = (regs.a - rd) & 0x80;
-  regs.p.z = (regs.a - rd) == 0;
-  read(dp);
-  write(dp, set ? rd | regs.a : rd & ~regs.a);
-}
-
-void op_transfer(alias from, alias to)() {
+void absoluteIndexedWrite(ubyte index) {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  address += index;
   idle();
+  read(address);
+  write(address, A);
+}
+
+void branch(bool take) {
+  auto displacement = fetch();
+  if (!take) return;
+  idle();
+  idle();
+  PC += cast(byte) displacement;
+}
+
+void branchBit(ubyte bit, bool match) {
+  auto address = fetch();
+  auto data = load(address);
+  idle();
+  auto displacement = fetch();
+  if (((data & (1 << bit)) != 0) != match) return;
+  idle();
+  idle();
+  PC += cast(byte) displacement;
+}
+
+void branchNotDirect() {
+  auto address = fetch();
+  auto data = load(address);
+  idle();
+  auto displacement = fetch();
+  if (A == data) return;
+  idle();
+  idle();
+  PC += cast(byte) displacement;
+}
+
+void branchNotDirectDecrement() {
+  auto address = fetch();
+  auto data = load(address);
+  store(address, --data);
+  auto displacement = fetch();
+  if (data == 0) return;
+  idle();
+  idle();
+  PC += cast(byte) displacement;
+}
+
+void branchNotDirectIndexed(ref ubyte index) {
+  auto address = fetch();
+  idle();
+  auto data = load(cast(ubyte) (address + index));
+  idle();
+  auto displacement = fetch();
+  if(A == data) return;
+  idle();
+  idle();
+  PC += cast(byte) displacement;
+}
+
+void branchNotYDecrement() {
+  read(PC);
+  idle();
+  auto displacement = fetch();
+  if(--Y == 0) return;
+  idle();
+  idle();
+  PC += cast(byte) displacement;
+}
+
+void break_() {
+  read(PC);
+  push(PC.h);
+  push(PC.l);
+  push(P);
+  idle();
+  Reg16 address;
+  address.l = read(0xffde);
+  address.h = read(0xffdf);
+  PC = address;
+  P.i = false;
+  P.b = true;
+}
+
+void callAbsolute() {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  idle();
+  push(PC.h);
+  push(PC.l);
+  idle();
+  idle();
+  PC = address;
+}
+
+void callTable(ubyte vector) {
+  read(PC);
+  idle();
+  push(PC.h);
+  push(PC.l);
+  idle();
+  ushort address = 0xffde - (vector << 1);
+  Reg16 pc;
+  pc.l = read(cast(ushort) (address + 0));
+  pc.h = read(cast(ushort) (address + 1));
+  PC = pc;
+}
+
+void complementCarry() {
+  read(PC);
+  idle();
+  P.c = !P.c;
+}
+
+void decimalAdjustAdd() {
+  read(PC);
+  idle();
+  if (P.c || (A) > 0x99) {
+    A += 0x60;
+    P.c = true;
+  }
+  if (P.h || (A & 15) > 0x09) {
+    A += 0x06;
+  }
+  P.z = A == 0;
+  P.n = (A & 0x80) != 0;
+}
+
+void decimalAdjustSub() {
+  read(PC);
+  idle();
+  if (!P.c || A > 0x99) {
+    A -= 0x60;
+    P.c = false;
+  }
+  if (!P.h || (A & 15) > 0x09) {
+    A -= 0x06;
+  }
+  P.z = A == 0;
+  P.n = (A & 0x80) != 0;
+}
+
+void directRead(alias op)(ref ubyte target) {
+  auto address = fetch();
+  auto data = load(address);
+  target = op(target, data);
+}
+
+void directModify(alias op)() {
+  auto address = fetch();
+  auto data = load(address);
+  store(address, op(data));
+}
+
+void directWrite(ubyte data) {
+  auto address = fetch();
+  load(address);
+  store(address, data);
+}
+
+void directDirectCompare(alias op)() {
+  auto source = fetch();
+  auto rhs = load(source);
+  auto target = fetch();
+  auto lhs = load(target);
+  op(lhs, rhs);
+  load(target);
+}
+
+void directDirectModify(alias op)() {
+  auto source = fetch();
+  auto rhs = load(source);
+  auto target = fetch();
+  auto lhs = load(target);
+  store(target, op(lhs, rhs));
+}
+
+void directDirectWrite() {
+  auto source = fetch();
+  auto data = load(source);
+  auto target = fetch();
+  store(target, data);
+}
+
+void directImmediateCompare(alias op)() {
+  auto immediate = fetch();
+  auto address = fetch();
+  auto data = load(address);
+  op(data, immediate);
+  load(address);
+}
+
+void directImmediateModify(alias op)() {
+  auto immediate = fetch();
+  auto address = fetch();
+  auto data = load(address);
+  store(address, op(data, immediate));
+}
+
+void directImmediateWrite() {
+  auto immediate = fetch();
+  auto address = fetch();
+  load(address);
+  store(address, immediate);
+}
+
+void directCompareWord(alias op)() {
+  auto address = fetch();
+  Reg16 data;
+  data.l = load(cast(ubyte) (address + 0));
+  data.h = load(cast(ubyte) (address + 1));
+  YA = op(YA, data);
+}
+
+void directReadWord(alias op)() {
+  auto address = fetch();
+  Reg16 data;
+  data.l = load(cast(ubyte) (address + 0));
+  idle();
+  data.h = load(cast(ubyte) (address + 1));
+  YA = op(YA, data);
+}
+
+void directModifyWord(int adjust) {
+  auto address = fetch();
+  Reg16 data;
+  data.l = load(address);
+  data.l += adjust;
+  store(address, data.l);
+  address += 1;
+  data.h = load(address);
+  store(address, data.h);
+  P.z = data == 0;
+  P.n = (data & 0x8000) != 0;
+}
+
+void directWriteWord() {
+  auto address = fetch();
+  load(address);
+  store(cast(ubyte) (address + 0), A);
+  store(cast(ubyte) (address + 1), Y);
+}
+
+void directIndexedRead(alias op)(ref ubyte target, ubyte index) {
+  auto address = fetch();
+  idle();
+  auto data = load(cast(ubyte) (address + index));
+  target = op(target, data);
+}
+
+void directIndexedModify(alias op)(ubyte index) {
+  auto address = cast(ubyte) (fetch() + index);
+  idle();
+  auto data = load(address);
+  store(address, op(data));
+}
+
+void directIndexedWrite(ubyte data, ubyte index) {
+  auto address = cast(ubyte) (fetch() + index);
+  idle();
+  load(address);
+  store(address, data);
+}
+
+void divide() {
+  read(PC);
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  auto ya = YA;
+  // Overflow set if quotient >= 256
+  P.h = ((Y & 15) >= (X & 15));
+  P.v = Y >= X;
+  if (Y < (X << 1)) {
+    // If quotient is <= 511 (will fit into 9-bit result)
+    A = cast(ubyte) (ya / X);
+    Y = cast(ubyte) (ya % X);
+  }
+  else {
+    // Otherwise, the quotient won't fit into P.v + A
+    // this emulates the odd behavior of the S-SMP in this case
+    A = cast(ubyte) (255 - (ya - (X << 9)) / (256 - X));
+    Y = cast(ubyte) (X   + (ya - (X << 9)) % (256 - X));
+  }
+  // Result is set based on a (quotient) only
+  P.z = A == 0;
+  P.n = (A & 0x80) != 0;
+}
+
+void exchangeNibble() {
+  read(PC);
+  idle();
+  idle();
+  idle();
+  A = cast(ubyte) ((A >> 4) | (A << 4));
+  P.z = A == 0;
+  P.n = (A & 0x80) != 0;
+}
+
+void flagSet(string flag)(bool value) {
+  enum f = "P." ~ flag;
+  read(PC);
+  if (mixin(f) == P.i) idle();
+  mixin(f) = value;
+}
+
+void immediateRead(alias op)(ref ubyte target) {
+  target = op(target, fetch());
+}
+
+void impliedModify(alias op)(ref ubyte target) {
+  read(PC);
+  target = op(target);
+}
+
+void indexedIndirectRead(alias op)(ubyte index) {
+  auto indirect = fetch();
+  idle();
+  Reg16 address;
+  address.l = load(cast(ubyte) (indirect + index + 0));
+  address.h = load(cast(ubyte) (indirect + index + 1));
+  auto data = read(address);
+  A = op(A, data);
+}
+
+void indexedIndirectWrite(ubyte data, ubyte index) {
+  auto indirect = fetch();
+  idle();
+  Reg16 address;
+  address.l = load(cast(ubyte) (indirect + index + 0));
+  address.h = load(cast(ubyte) (indirect + index + 1));
+  read(address);
+  write(address, A);
+}
+
+void indirectIndexedRead(alias op)(ubyte index) {
+  auto indirect = fetch();
+  Reg16 address;
+  address.l = load(indirect);
+  address.h = load(cast(ubyte) (indirect + 1));
+  idle();
+  auto data = read(cast(ushort) (address + index));
+  A = op(A, data);
+}
+
+void indirectIndexedWrite(ubyte data, ubyte index) {
+  auto indirect = fetch();
+  Reg16 address;
+  address.l = load(cast(ubyte) (indirect + 0));
+  address.h = load(cast(ubyte) (indirect + 1));
+  idle();
+  address += index;
+  read(address);
+  write(address, data);
+}
+
+void indirectXRead(alias op)() {
+  read(PC);
+  auto data = load(X);
+  A = op(A, data);
+}
+
+void indirectXWrite(ubyte data) {
+  read(PC);
+  load(X);
+  store(X, data);
+}
+
+void indirectXIncrementRead(ref ubyte data) {
+  read(PC);
+  data = load(X++);
+  idle(); // Quirk: consumes extra idle cycle compared to most read instructions
+  P.z = A == 0;
+  P.n = (A & 0x80) != 0;
+}
+
+void indirectXIncrementWrite(ubyte data) {
+  read(PC);
+  idle(); // Quirk: not a read cycle as with most write instructions
+  store(X++, A);
+}
+
+void indirectXWriteIndirectY(alias op)() {
+  read(PC);
+  auto rhs = load(Y);
+  auto lhs = load(X);
+  store(X, op(lhs, rhs));
+}
+
+void jumpAbsolute() {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  PC = address;
+}
+
+void jumpIndirectX() {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  idle();
+  Reg16 pc;
+  pc.l = read(cast(ushort) (address + X + 0));
+  pc.h = read(cast(ushort) (address + X + 1));
+  PC = pc;
+}
+
+void multiply() {
+  read(PC);
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  idle();
+  ushort ya = Y * A;
+  A = cast(ubyte) ya;
+  Y = ya >> 8;
+  // Result is set based on y (high-byte) only
+  P.z = Y == 0;
+  P.n = (Y & 0x80) != 0;
+}
+
+void noOperation() {
+  read(PC);
+}
+
+void overflowClear() {
+  idle();
+  P.h = false;
+  P.v = false;
+}
+
+void pullOp(ref ubyte data) {
+  read(PC);
+  idle();
+  data = pull();
+}
+
+void pullP() {
+  idle();
+  idle();
+  P = pull();
+}
+
+void pushOp(ubyte data) {
+  read(PC);
+  push(data);
+  idle();
+}
+
+void returnInterrupt() {
+  read(PC);
+  idle();
+  P = pull();
+  Reg16 address;
+  address.l = pull();
+  address.h = pull();
+  PC = address;
+}
+
+void returnSubroutine() {
+  read(PC);
+  idle();
+  Reg16 address;
+  address.l = pull();
+  address.h = pull();
+  PC = address;
+}
+
+void stop() {
+  regs.stop = true;
+  while (regs.stop && !synchronizing) {
+    read(PC);
+    idle();
+  }
+}
+
+void testSetBitsAbsolute(bool set) {
+  Reg16 address;
+  address.l = fetch();
+  address.h = fetch();
+  auto data = read(address);
+  P.z = (A - data) == 0;
+  P.n = ((A - data) & 0x80) != 0;
+  read(address);
+  write(address, set ? data | A : data & ~A);
+}
+
+void transfer(ubyte from, ref ubyte to) {
+  read(PC);
   to = from;
-  if (to == regs.s) return;
-  regs.p.n = (to & 0x80) != 0;
-  regs.p.z = (to == 0);
+  if (to == S) return;
+  P.z = to == 0;
+  P.n = (to & 0x80) != 0;
 }
 
-void op_write_addr(alias r)() {
-  dp.l = readPC();
-  dp.h = readPC();
-  read(dp);
-  write(dp, r);
+void callPage() {
+  rd = fetch();
+  idle();
+  idle();
+  push(PC.h);
+  push(PC.l);
+  PC = 0xff00 | rd;
 }
 
-void op_write_addri(alias i)() {
-  dp.l = readPC();
-  dp.h = readPC();
-  idle();
-  dp += i;
-  read(dp);
-  write(dp, regs.a);
-}
-
-void op_write_dp(alias r)() {
-  dp = readPC();
-  readDP(dp);
-  writeDP(dp, r);
-}
-
-void op_write_dpi(alias r, alias i)() {
-  dp = readPC() + i;
-  idle();
-  readDP(dp);
-  writeDP(dp, r);
-}
-
-void op_write_dp_const(alias op)() {
-  rd = readPC();
-  dp = readPC();
-  wr = readDP(dp);
-  wr = op(wr, rd);
-  op != &op_cmp ? writeDP(dp, wr) : idle();
-}
-
-void op_write_dp_dp(alias op)() {
-  sp = readPC();
-  rd = readDP(sp);
-  dp = readPC();
-  static if (!is(op == op_st)) wr = readDP(dp);
-  wr = op(wr, rd);
-  op != &op_cmp ? writeDP(dp, wr) : idle();
-}
-
-void op_write_ix_iy(alias op)() {
-  idle();
-  rd = readDP(regs.y);
-  wr = readDP(regs.x);
-  wr = op(wr, rd);
-  !is(op == op_cmp) ? writeDP(regs.x, wr) : idle();
-}
-
-//
-
-void op_bne_dp() {
-  dp = readPC();
-  sp = readDP(cast(ubyte) dp);
-  rd = readPC();
-  idle();
-  if (regs.a == sp) return;
-  idle();
-  idle();
-  regs.pc += cast(byte) rd;
-}
-
-void op_bne_dpdec() {
-  dp = readPC();
-  wr = readDP(cast(ubyte) dp);
-  writeDP(cast(ubyte) dp, cast(ubyte) --wr);
-  rd = readPC();
-  if (wr == 0) return;
-  idle();
-  idle();
-  regs.pc += cast(byte) rd;
-}
-
-void op_bne_dpx() {
-  dp = readPC();
-  idle();
-  sp = readDP(cast(ubyte) (dp + regs.x));
-  rd = readPC();
-  idle();
-  if(regs.a == sp) return;
-  idle();
-  idle();
-  regs.pc += cast(byte) rd;
-}
-
-void op_bne_ydec() {
-  rd = readPC();
-  idle();
-  idle();
-  if(--regs.y == 0) return;
-  idle();
-  idle();
-  regs.pc += cast(byte) rd;
-}
-
-void op_brk() {
-  rd.l = read(0xffde);
-  rd.h = read(0xffdf);
-  idle();
-  idle();
-  writeSP(regs.pc.h);
-  writeSP(regs.pc.l);
-  writeSP(regs.p);
-  regs.pc = rd;
-  regs.p.b = 1;
-  regs.p.i = 0;
-}
-
-void op_clv() {
-  idle();
-  regs.p.v = 0;
-  regs.p.h = 0;
-}
-
-void op_cmc() {
-  idle();
-  idle();
-  regs.p.c = !regs.p.c;
-}
-
-void op_daa() {
-  idle();
-  idle();
-  if(regs.p.c || (regs.a) > 0x99) {
-    regs.a += 0x60;
-    regs.p.c = 1;
-  }
-  if(regs.p.h || (regs.a & 15) > 0x09) {
-    regs.a += 0x06;
-  }
-  regs.p.n = (regs.a & 0x80) != 0;
-  regs.p.z = (regs.a == 0);
-}
-
-void op_das() {
-  idle();
-  idle();
-  if(!regs.p.c || (regs.a) > 0x99) {
-    regs.a -= 0x60;
-    regs.p.c = 0;
-  }
-  if(!regs.p.h || (regs.a & 15) > 0x09) {
-    regs.a -= 0x06;
-  }
-  regs.p.n = (regs.a & 0x80) != 0;
-  regs.p.z = (regs.a == 0);
-}
-
-void op_div_ya_x() {
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  ya = regs.ya;
-  //overflow set if quotient >= 256
-  regs.p.v = (regs.y >= regs.x);
-  regs.p.h = ((regs.y & 15) >= (regs.x & 15));
-  if(regs.y < (regs.x << 1)) {
-    //if quotient is <= 511 (will fit into 9-bit result)
-    regs.a = cast(ubyte) (ya / regs.x);
-    regs.y = ya % regs.x;
-  } else {
-    //otherwise, the quotient won't fit into regs.p.v + regs.a
-    //this emulates the odd behavior of the S-SMP in this case
-    regs.a = cast(ubyte) (255    - (ya - (regs.x << 9)) / (256 - regs.x));
-    regs.y = cast(ubyte) (regs.x + (ya - (regs.x << 9)) % (256 - regs.x));
-  }
-  //result is set based on a (quotient) only
-  regs.p.n = (regs.a & 0x80) != 0;
-  regs.p.z = (regs.a == 0);
-}
-
-void op_jmp_addr() {
-  rd.l = readPC();
-  rd.h = readPC();
-  regs.pc = rd;
-}
-
-void op_jmp_iaddrx() {
-  dp.l = readPC();
-  dp.h = readPC();
-  idle();
-  dp += regs.x;
-  rd.l = read(dp++);
-  rd.h = read(dp++);
-  regs.pc = rd;
-}
-
-void op_jsp_dp() {
-  rd = readPC();
-  idle();
-  idle();
-  writeSP(regs.pc.h);
-  writeSP(regs.pc.l);
-  regs.pc = 0xff00 | rd;
-}
-
-void op_jsr_addr() {
-  rd.l = readPC();
-  rd.h = readPC();
-  idle();
-  idle();
-  idle();
-  writeSP(regs.pc.h);
-  writeSP(regs.pc.l);
-  regs.pc = rd;
-}
-
-void op_jst() {
-  dp = 0xffde - ((opcode >> 4) << 1);
-  rd.l = read(dp++);
-  rd.h = read(dp++);
-  idle();
-  idle();
-  idle();
-  writeSP(regs.pc.h);
-  writeSP(regs.pc.l);
-  regs.pc = rd;
-}
-
-void op_lda_ixinc() {
-  idle();
-  regs.a = readDP(regs.x++);
-  idle();
-  regs.p.n = (regs.a & 0x80) != 0;
-  regs.p.z = regs.a == 0;
-}
-
-void op_mul_ya() {
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  idle();
-  ya = regs.y * regs.a;
-  regs.a = cast(ubyte) ya;
-  regs.y = ya >> 8;
-  //result is set based on y (high-byte) only
-  regs.p.n = (regs.y & 0x80) != 0;
-  regs.p.z = (regs.y == 0);
-}
-
-void op_nop() {
-  idle();
-}
-
-void op_plp() {
-  idle();
-  idle();
-  regs.p = readSP();
-}
-
-void op_rti() {
-  regs.p = readSP();
-  rd.l = readSP();
-  rd.h = readSP();
-  idle();
-  idle();
-  regs.pc = rd;
-}
-
-void op_rts() {
-  rd.l = readSP();
-  rd.h = readSP();
-  idle();
-  idle();
-  regs.pc = rd;
-}
-
-void op_sta_idpx() {
-  sp = readPC() + regs.x;
-  idle();
-  dp.l = readDP(cast(ubyte) sp++);
-  dp.h = readDP(cast(ubyte) sp++);
-  read(dp);
-  write(dp, regs.a);
-}
-
-void op_sta_idpy() {
-  sp = readPC();
-  dp.l = readDP(cast(ubyte) sp++);
-  dp.h = readDP(cast(ubyte) sp++);
-  idle();
-  dp += regs.y;
-  read(dp);
-  write(dp, regs.a);
-}
-
-void op_sta_ix() {
-  idle();
-  readDP(regs.x);
-  writeDP(regs.x, regs.a);
-}
-
-void op_sta_ixinc() {
-  idle();
-  idle();
-  writeDP(regs.x++, regs.a);
-}
-
-void op_stw_dp() {
-  dp = readPC();
-  readDP(cast(ubyte) dp);
-  writeDP(cast(ubyte) dp++, regs.a);
-  writeDP(cast(ubyte) dp++, regs.y);
-}
-
-void op_wait() {
-  while(true) {
-    idle();
+void wait() {
+  regs.wait = true;
+  while (regs.wait && !synchronizing) {
+    read(PC);
     idle();
   }
-}
-
-void op_xcn() {
-  idle();
-  idle();
-  idle();
-  idle();
-  regs.a = cast(ubyte) ((regs.a >> 4) | (regs.a << 4));
-  regs.p.n = (regs.a & 0x80) != 0;
-  regs.p.z = regs.a == 0;
 }
 
 // SPC700 Opcode Table
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 void instruction() {
-  switch (opcode = readPC()) {
-  default: assert(0);
-  case 0x00: return op_nop();
-  case 0x01: return op_jst();
-  case 0x02: return op_set_bit();
-  case 0x03: return op_branch_bit();
-  // case 0x04: return op_read_dp!(op_or, regs.a);
-  // case 0x05: return op_read_addr!or(regs.a);
-  // case 0x06: return op_read_ix!or();
-  // case 0x07: return op_read_idpx!or();
-  // case 0x08: return op_read_const!or(regs.a);
-  // case 0x09: return op_writ_dp_dp!or();
-  // case 0x0a: return op_set_addr_bit();
-  // case 0x0b: return op_adjust_dp!asl();
-  // case 0x0c: return op_adjust_addr!asl();
-  // case 0x0d: return op_push(regs.p);
-  // case 0x0e: return op_test_addr(1);
-  // case 0x0f: return op_brk();
-  // case 0x10: return op_branch(regs.p.n == 0);
-  // case 0x11: return op_jst();
-  // case 0x12: return op_set_bit();
-  // case 0x13: return op_branch_bit();
-  // case 0x14: return op_read_dpi!or(regs.a, regs.x);
-  // case 0x15: return op_read_addri!or(regs.x);
-  // case 0x16: return op_read_addri!or(regs.y);
-  // case 0x17: return op_read_idpy!or();
-  // case 0x18: return op_write_dp_const!or();
-  // case 0x19: return op_write_ix_iy!or();
-  // case 0x1a: return op_adjust_dpw(-1);
-  // case 0x1b: return op_adjust_dpx!asl();
-  // case 0x1c: return op_adjust!asl(regs.a);
-  // case 0x1d: return op_adjust!dec(regs.x);
-  // case 0x1e: return op_read_addr!cmp(regs.x);
-  // case 0x1f: return op_jmp_iaddrx();
-  // case 0x20: return op_set_flag(regs.p.p.bit, 0);
-  // case 0x21: return op_jst();
-  // case 0x22: return op_set_bit();
-  // case 0x23: return op_branch_bit();
-  // case 0x24: return op_read_dp!and(regs.a);
-  // case 0x25: return op_read_addr!and(regs.a);
-  // case 0x26: return op_read_ix!and();
-  // case 0x27: return op_read_idpx!and();
-  // case 0x28: return op_read_const!and(regs.a);
-  // case 0x29: return op_write_dp!and();
-  // case 0x2a: return op_set_addr_bit();
-  // case 0x2b: return op_adjust_dp!rol();
-  // case 0x2c: return op_adjust_addr!rol();
-  // case 0x2d: return op_push(regs.a);
-  // case 0x2e: return op_bne_dp();
-  // case 0x2f: return op_branch(true);
-  // case 0x30: return op_branch(regs.p.n == 1);
-  // case 0x31: return op_jst();
-  // case 0x32: return op_set_bit();
-  // case 0x33: return op_branch_bit();
-  // case 0x34: return op_read_dpi!and(regs.a, regs.x);
-  // case 0x35: return op_read_addri!and(regs.x);
-  // case 0x36: return op_read_addri!and(regs.y);
-  // case 0x37: return op_read_idpy!and();
-  // case 0x38: return op_write_dp_const!and();
-  // case 0x39: return op_write_ix_iy!and();
-  // case 0x3a: return op_adjust_dpw(1);
-  // case 0x3b: return op_adjust_dpx!rol();
-  // case 0x3c: return op_adjust!rol(regs.a);
-  // case 0x3d: return op_adjust!inc(regs.x);
-  // case 0x3e: return op_read_dp!cmp(regs.x);
-  // case 0x3f: return op_jsr_addr();
-  // case 0x40: return op_set_flag(regs.p.p.bit, 1);
-  // case 0x41: return op_jst();
-  // case 0x42: return op_set_bit();
-  // case 0x43: return op_branch_bit();
-  // case 0x44: return op_read_dp!eor(regs.a);
-  // case 0x45: return op_read_addr!eor(regs.a);
-  // case 0x46: return op_read_ix!eor();
-  // case 0x47: return op_read_idpx!eor();
-  // case 0x48: return op_read_const!eor(regs.a);
-  // case 0x49: return op_write_dp_dp!eor();
-  // case 0x4a: return op_set_addr_bit();
-  // case 0x4b: return op_adjust_dp!lsr();
-  // case 0x4c: return op_adjust_addr!lsr();
-  // case 0x4d: return op_push(regs.x);
-  // case 0x4e: return op_test_addr(0);
-  // case 0x4f: return op_jsp_dp();
-  // case 0x50: return op_branch(regs.p.v == 0);
-  // case 0x51: return op_jst();
-  // case 0x52: return op_set_bit();
-  // case 0x53: return op_branch_bit();
-  // case 0x54: return op_read_dpi!eor(regs.a, regs.x);
-  // case 0x55: return op_read_addri!eor(regs.x);
-  // case 0x56: return op_read_addri!eor(regs.y);
-  // case 0x57: return op_read_idpy!eor();
-  // case 0x58: return op_write_dp_const!eor();
-  // case 0x59: return op_write_ix_iy!eor();
-  // case 0x5a: return op_read_dpw!cpw();
-  // case 0x5b: return op_adjust_dpx!lsr();
-  // case 0x5c: return op_adjust!lsr(regs.a);
-  // case 0x5d: return op_transfer(regs.a, regs.x);
-  // case 0x5e: return op_read_addr!cmp(regs.y);
-  // case 0x5f: return op_jmp_addr();
-  // case 0x60: return op_set_flag(regs.p.c.bit, 0);
-  // case 0x61: return op_jst();
-  // case 0x62: return op_set_bit);
-  // case 0x63: return op_branch_bit);
-  // case 0x64: return op_read_dp, fp(cmp), regs.a);
-  // case 0x65: return op_read_addr, fp(cmp), regs.a);
-  // case 0x66: return op_read_ix, fp(cmp));
-  // case 0x67: return op_read_idpx, fp(cmp));
-  // case 0x68: return op_read_const, fp(cmp), regs.a);
-  // case 0x69: return op_write_dp_dp, fp(cmp));
-  // case 0x6a: return op_set_addr_bit);
-  // case 0x6b: return op_adjust_dp, fp(ror));
-  // case 0x6c: return op_adjust_addr, fp(ror));
-  // case 0x6d: return op_push, regs.y);
-  // case 0x6e: return op_bne_dpdec);
-  // case 0x6f: return op_rts();
-  // case 0x70: return op_branch(regs.p.v == 1);
-  // case 0x71: return op_jst();
-  // case 0x72: return op_set_bit);
-  // case 0x73: return op_branch_bit);
-  // case 0x74: return op_read_dpi, fp(cmp), regs.a, regs.x);
-  // case 0x75: return op_read_addri, fp(cmp), regs.x);
-  // case 0x76: return op_read_addri, fp(cmp), regs.y);
-  // case 0x77: return op_read_idpy, fp(cmp));
-  // case 0x78: return op_write_dp_const, fp(cmp));
-  // case 0x79: return op_write_ix_iy, fp(cmp));
-  // case 0x7a: return op_read_dpw, fp(adw));
-  // case 0x7b: return op_adjust_dpx, fp(ror));
-  // case 0x7c: return op_adjust, fp(ror), regs.a);
-  // case 0x7d: return op_transfer(regs.x, regs.a);
-  // case 0x7e: return op_read_dp, fp(cmp), regs.y);
-  // case 0x7f: return op_rti();
-  // case 0x80: return op_set_flag, regs.p.c.bit, 1);
-  // case 0x81: return op_jst();
-  // case 0x82: return op_set_bit);
-  // case 0x83: return op_branch_bit);
-  // case 0x84: return op_read_dp, fp(adc), regs.a);
-  // case 0x85: return op_read_addr, fp(adc), regs.a);
-  // case 0x86: return op_read_ix, fp(adc));
-  // case 0x87: return op_read_idpx, fp(adc));
-  // case 0x88: return op_read_const, fp(adc), regs.a);
-  // case 0x89: return op_write_dp_dp, fp(adc));
-  // case 0x8a: return op_set_addr_bit);
-  // case 0x8b: return op_adjust_dp, fp(dec));
-  // case 0x8c: return op_adjust_addr, fp(dec));
-  // case 0x8d: return op_read_const, fp(ld), regs.y);
-  // case 0x8e: return op_plp();
-  // case 0x8f: return op_write_dp_const, fp(st));
-  // case 0x90: return op_branch(regs.p.c == 0);
-  // case 0x91: return op_jst();
-  // case 0x92: return op_set_bit);
-  // case 0x93: return op_branch_bit);
-  // case 0x94: return op_read_dpi, fp(adc), regs.a, regs.x);
-  // case 0x95: return op_read_addri, fp(adc), regs.x);
-  // case 0x96: return op_read_addri, fp(adc), regs.y);
-  // case 0x97: return op_read_idpy, fp(adc));
-  // case 0x98: return op_write_dp_const, fp(adc));
-  // case 0x99: return op_write_ix_iy, fp(adc));
-  // case 0x9a: return op_read_dpw, fp(sbw));
-  // case 0x9b: return op_adjust_dpx, fp(dec));
-  // case 0x9c: return op_adjust(, fp(dec), regs.a);
-  // case 0x9d: return op_transfer(regs.s, regs.x);
-  // case 0x9e: return op_div_ya_x);
-  // case 0x9f: return op_xcn();
-  // case 0xa0: return op_set_flag, regs.p.i.bit, 1);
-  // case 0xa1: return op_jst();
-  // case 0xa2: return op_set_bit);
-  // case 0xa3: return op_branch_bit);
-  // case 0xa4: return op_read_dp, fp(sbc), regs.a);
-  // case 0xa5: return op_read_addr, fp(sbc), regs.a);
-  // case 0xa6: return op_read_ix, fp(sbc));
-  // case 0xa7: return op_read_idpx, fp(sbc));
-  // case 0xa8: return op_read_const, fp(sbc), regs.a);
-  // case 0xa9: return op_write_dp_dp, fp(sbc));
-  // case 0xaa: return op_set_addr_bit);
-  // case 0xab: return op_adjust_dp, fp(inc));
-  // case 0xac: return op_adjust_addr, fp(inc));
-  // case 0xad: return op_read_const, fp(cmp), regs.y);
-  // case 0xae: return op_pull(regs.a);
-  // case 0xaf: return op_sta_ixinc);
-  // case 0xb0: return op_branch(regs.p.c == 1);
-  // case 0xb1: return op_jst();
-  // case 0xb2: return op_set_bit);
-  // case 0xb3: return op_branch_bit);
-  // case 0xb4: return op_read_dpi, fp(sbc), regs.a, regs.x);
-  // case 0xb5: return op_read_addri, fp(sbc), regs.x);
-  // case 0xb6: return op_read_addri, fp(sbc), regs.y);
-  // case 0xb7: return op_read_idpy, fp(sbc));
-  // case 0xb8: return op_write_dp_const, fp(sbc));
-  // case 0xb9: return op_write_ix_iy, fp(sbc));
-  // case 0xba: return op_read_dpw, fp(ldw));
-  // case 0xbb: return op_adjust_dpx, fp(inc));
-  // case 0xbc: return op_adjust(, fp(inc), regs.a);
-  // case 0xbd: return op_transfer(regs.x, regs.s);
-  // case 0xbe: return op_das();
-  // case 0xbf: return op_lda_ixinc);
-  // case 0xc0: return op_set_flag, regs.p.i.bit, 0);
-  // case 0xc1: return op_jst();
-  // case 0xc2: return op_set_bit);
-  // case 0xc3: return op_branch_bit);
-  // case 0xc4: return op_write_dp, regs.a);
-  // case 0xc5: return op_write_addr, regs.a);
-  // case 0xc6: return op_sta_ix);
-  // case 0xc7: return op_sta_idpx);
-  // case 0xc8: return op_read_const, fp(cmp), regs.x);
-  // case 0xc9: return op_write_addr, regs.x);
-  // case 0xca: return op_set_addr_bit);
-  // case 0xcb: return op_write_dp, regs.y);
-  // case 0xcc: return op_write_addr, regs.y);
-  // case 0xcd: return op_read_const, fp(ld), regs.x);
-  // case 0xce: return op_pull(regs.x);
-  // case 0xcf: return op_mul_ya);
-  // case 0xd0: return op_branch(regs.p.z == 0);
-  // case 0xd1: return op_jst();
-  // case 0xd2: return op_set_bit);
-  // case 0xd3: return op_branch_bit);
-  // case 0xd4: return op_write_dpi, regs.a, regs.x);
-  // case 0xd5: return op_write_addri, regs.x);
-  // case 0xd6: return op_write_addri, regs.y);
-  // case 0xd7: return op_sta_idpy);
-  // case 0xd8: return op_write_dp, regs.x);
-  // case 0xd9: return op_write_dpi, regs.x, regs.y);
-  // case 0xda: return op_stw_dp);
-  // case 0xdb: return op_write_dpi, regs.y, regs.x);
-  // case 0xdc: return op_adjust(fp(dec), regs.y);
-  // case 0xdd: return op_transfer(regs.y, regs.a);
-  // case 0xde: return op_bne_dpx);
-  // case 0xdf: return op_daa();
-  // case 0xe0: return op_clv();
-  // case 0xe1: return op_jst();
-  // case 0xe2: return op_set_bit);
-  // case 0xe3: return op_branch_bit);
-  // case 0xe4: return op_read_dp, fp(ld), regs.a);
-  // case 0xe5: return op_read_addr, fp(ld), regs.a);
-  // case 0xe6: return op_read_ix, fp(ld));
-  // case 0xe7: return op_read_idpx, fp(ld));
-  // case 0xe8: return op_read_const, fp(ld), regs.a);
-  // case 0xe9: return op_read_addr, fp(ld), regs.x);
-  // case 0xea: return op_set_addr_bit);
-  // case 0xeb: return op_read_dp, fp(ld), regs.y);
-  // case 0xec: return op_read_addr, fp(ld), regs.y);
-  // case 0xed: return op_cmc();
-  // case 0xee: return op_pull(regs.y);
-  // case 0xef: return op_wait();
-  // case 0xf0: return op_branch(regs.p.z == 1);
-  // case 0xf1: return op_jst();
-  // case 0xf2: return op_set_bit);
-  // case 0xf3: return op_branch_bit);
-  // case 0xf4: return op_read_dpi, fp(ld), regs.a, regs.x);
-  // case 0xf5: return op_read_addri, fp(ld), regs.x);
-  // case 0xf6: return op_read_addri, fp(ld), regs.y);
-  // case 0xf7: return op_read_idpy, fp(ld));
-  // case 0xf8: return op_read_dp, fp(ld), regs.x);
-  // case 0xf9: return op_read_dpi, fp(ld), regs.x, regs.y);
-  // case 0xfa: return op_write_dp_dp, fp(st));
-  // case 0xfb: return op_read_dpi, fp(ld), regs.y, regs.x);
-  // case 0xfc: return op_adjust(, fp(inc), regs.y);
-  // case 0xfd: return op_transfer(regs.a, regs.y);
-  // case 0xfe: return op_bne_ydec);
-  // case 0xff: return op_wait();
+  final switch (opcode = fetch()) {
+  case 0x00: return noOperation();
+  case 0x01: return callTable(0);
+  case 0x02: return absoluteBitSet(0, true);
+  case 0x03: return branchBit(0, true);
+  case 0x04: return directRead!or(A);
+  case 0x05: return absoluteRead!or(A);
+  case 0x06: return indirectXRead!or();
+  case 0x07: return indexedIndirectRead!or(X);
+  case 0x08: return immediateRead!or(A);
+  case 0x09: return directDirectModify!or();
+  case 0x0a: return absoluteBitModify(0);
+  case 0x0b: return directModify!asl();
+  case 0x0c: return absoluteModify!asl();
+  case 0x0d: return pushOp(P);
+  case 0x0e: return testSetBitsAbsolute(true);
+  case 0x0f: return break_();
+  case 0x10: return branch(P.n == 0);
+  case 0x11: return callTable(1);
+  case 0x12: return absoluteBitSet(0, false);
+  case 0x13: return branchBit(0, false);
+  case 0x14: return directIndexedRead!or(A, X);
+  case 0x15: return absoluteIndexedRead!or(X);
+  case 0x16: return absoluteIndexedRead!or(Y);
+  case 0x17: return indirectIndexedRead!or(Y);
+  case 0x18: return directImmediateModify!or();
+  case 0x19: return indirectXWriteIndirectY!or();
+  case 0x1a: return directModifyWord(-1);
+  case 0x1b: return directIndexedModify!asl(X);
+  case 0x1c: return impliedModify!asl(A);
+  case 0x1d: return impliedModify!dec(X);
+  case 0x1e: return absoluteRead!cmp(X);
+  case 0x1f: return jumpIndirectX();
+  case 0x20: return flagSet!"p"(false);
+  case 0x21: return callTable(2);
+  case 0x22: return absoluteBitSet(1, true);
+  case 0x23: return branchBit(1, true);
+  case 0x24: return directRead!and(A);
+  case 0x25: return absoluteRead!and(A);
+  case 0x26: return indirectXRead!and();
+  case 0x27: return indexedIndirectRead!and(X);
+  case 0x28: return immediateRead!and(A);
+  case 0x29: return directDirectModify!and();
+  case 0x2a: return absoluteBitModify(1);
+  case 0x2b: return directModify!rol();
+  case 0x2c: return absoluteModify!rol();
+  case 0x2d: return pushOp(A);
+  case 0x2e: return branchNotDirect();
+  case 0x2f: return branch(true);
+  case 0x30: return branch(P.n == 1);
+  case 0x31: return callTable(3);
+  case 0x32: return absoluteBitSet(1, false);
+  case 0x33: return branchBit(1, false);
+  case 0x34: return directIndexedRead!and(A, X);
+  case 0x35: return absoluteIndexedRead!and(X);
+  case 0x36: return absoluteIndexedRead!and(Y);
+  case 0x37: return indirectIndexedRead!and(Y);
+  case 0x38: return directImmediateModify!and();
+  case 0x39: return indirectXWriteIndirectY!and();
+  case 0x3a: return directModifyWord(+1);
+  case 0x3b: return directIndexedModify!rol(X);
+  case 0x3c: return impliedModify!rol(A);
+  case 0x3d: return impliedModify!inc(X);
+  case 0x3e: return directRead!cmp(X);
+  case 0x3f: return callAbsolute();
+  case 0x40: return flagSet!"p"(true);
+  case 0x41: return callTable(4);
+  case 0x42: return absoluteBitSet(2, true);
+  case 0x43: return branchBit(2, true);
+  case 0x44: return directRead!eor(A);
+  case 0x45: return absoluteRead!eor(A);
+  case 0x46: return indirectXRead!eor();
+  case 0x47: return indexedIndirectRead!eor(X);
+  case 0x48: return immediateRead!eor(A);
+  case 0x49: return directDirectModify!eor();
+  case 0x4a: return absoluteBitModify(2);
+  case 0x4b: return directModify!lsr();
+  case 0x4c: return absoluteModify!lsr();
+  case 0x4d: return pushOp(X);
+  case 0x4e: return testSetBitsAbsolute(0);
+  case 0x4f: return callPage();
+  case 0x50: return branch(P.v == 0);
+  case 0x51: return callTable(5);
+  case 0x52: return absoluteBitSet(2, false);
+  case 0x53: return branchBit(2, false);
+  case 0x54: return directIndexedRead!eor(A, X);
+  case 0x55: return absoluteIndexedRead!eor(X);
+  case 0x56: return absoluteIndexedRead!eor(Y);
+  case 0x57: return indirectIndexedRead!eor(Y);
+  case 0x58: return directImmediateModify!eor();
+  case 0x59: return indirectXWriteIndirectY!eor();
+  case 0x5a: return directCompareWord!cpw();
+  case 0x5b: return directIndexedModify!lsr(X);
+  case 0x5c: return impliedModify!lsr(A);
+  case 0x5d: return transfer(A, X);
+  case 0x5e: return absoluteRead!cmp(Y);
+  case 0x5f: return jumpAbsolute();
+  case 0x60: return flagSet!"c"(false);
+  case 0x61: return callTable(6);
+  case 0x62: return absoluteBitSet(3, true);
+  case 0x63: return branchBit(3, true);
+  case 0x64: return directRead!cmp(A);
+  case 0x65: return absoluteRead!cmp(A);
+  case 0x66: return indirectXRead!(cmp);
+  case 0x67: return indexedIndirectRead!(cmp)(X);
+  case 0x68: return immediateRead!cmp(A);
+  case 0x69: return directDirectCompare!cmp;
+  case 0x6a: return absoluteBitModify(3);
+  case 0x6b: return directModify!ror;
+  case 0x6c: return absoluteModify!ror;
+  case 0x6d: return pushOp(Y);
+  case 0x6e: return branchNotDirectDecrement();
+  case 0x6f: return returnSubroutine();
+  case 0x70: return branch(P.v == 1);
+  case 0x71: return callTable(7);
+  case 0x72: return absoluteBitSet(3, false);
+  case 0x73: return branchBit(3, false);
+  case 0x74: return directIndexedRead!cmp(A, X);
+  case 0x75: return absoluteIndexedRead!cmp(X);
+  case 0x76: return absoluteIndexedRead!cmp(Y);
+  case 0x77: return indirectIndexedRead!cmp(Y);
+  case 0x78: return directImmediateCompare!cmp;
+  case 0x79: return indirectXWriteIndirectY!cmp;
+  case 0x7a: return directReadWord!adw;
+  case 0x7b: return directIndexedModify!ror(X);
+  case 0x7c: return impliedModify!ror(A);
+  case 0x7d: return transfer(X, A);
+  case 0x7e: return directRead!cmp(Y);
+  case 0x7f: return returnInterrupt();
+  case 0x80: return flagSet!"c"(true);
+  case 0x81: return callTable(8);
+  case 0x82: return absoluteBitSet(4, true);
+  case 0x83: return branchBit(4, true);
+  case 0x84: return directRead!adc(A);
+  case 0x85: return absoluteRead!adc(A);
+  case 0x86: return indirectXRead!adc;
+  case 0x87: return indexedIndirectRead!adc(X);
+  case 0x88: return immediateRead!adc(A);
+  case 0x89: return directDirectModify!adc;
+  case 0x8a: return absoluteBitModify(4);
+  case 0x8b: return directModify!dec;
+  case 0x8c: return absoluteModify!dec;
+  case 0x8d: return immediateRead!ld(Y);
+  case 0x8e: return pullP();
+  case 0x8f: return directImmediateWrite();
+  case 0x90: return branch(P.c == 0);
+  case 0x91: return callTable(9);
+  case 0x92: return absoluteBitSet(4, false);
+  case 0x93: return branchBit(4, false);
+  case 0x94: return directIndexedRead!adc(A, X);
+  case 0x95: return absoluteIndexedRead!adc(X);
+  case 0x96: return absoluteIndexedRead!adc(Y);
+  case 0x97: return indirectIndexedRead!adc(Y);
+  case 0x98: return directImmediateModify!adc;
+  case 0x99: return indirectXWriteIndirectY!adc;
+  case 0x9a: return directReadWord!sbw;
+  case 0x9b: return directIndexedModify!dec(X);
+  case 0x9c: return impliedModify!dec(A);
+  case 0x9d: return transfer(S, X);
+  case 0x9e: return divide();
+  case 0x9f: return exchangeNibble();
+  case 0xa0: return flagSet!"i"(true);
+  case 0xa1: return callTable(10);
+  case 0xa2: return absoluteBitSet(5, true);
+  case 0xa3: return branchBit(5, true);
+  case 0xa4: return directRead!sbc(A);
+  case 0xa5: return absoluteRead!sbc(A);
+  case 0xa6: return indirectXRead!sbc;
+  case 0xa7: return indexedIndirectRead!sbc(X);
+  case 0xa8: return immediateRead!sbc(A);
+  case 0xa9: return directDirectModify!sbc;
+  case 0xaa: return absoluteBitModify(5);
+  case 0xab: return directModify!inc;
+  case 0xac: return absoluteModify!inc;
+  case 0xad: return immediateRead!cmp(Y);
+  case 0xae: return pullOp(A);
+  case 0xaf: return indirectXIncrementWrite(A);
+  case 0xb0: return branch(P.c == 1);
+  case 0xb1: return callTable(11);
+  case 0xb2: return absoluteBitSet(5, false);
+  case 0xb3: return branchBit(5, false);
+  case 0xb4: return directIndexedRead!sbc(A, X);
+  case 0xb5: return absoluteIndexedRead!sbc(X);
+  case 0xb6: return absoluteIndexedRead!sbc(Y);
+  case 0xb7: return indirectIndexedRead!sbc(Y);
+  case 0xb8: return directImmediateModify!sbc;
+  case 0xb9: return indirectXWriteIndirectY!sbc;
+  case 0xba: return directReadWord!ldw;
+  case 0xbb: return directIndexedModify!inc(X);
+  case 0xbc: return impliedModify!inc(A);
+  case 0xbd: return transfer(X, S);
+  case 0xbe: return decimalAdjustSub();
+  case 0xbf: return indirectXIncrementRead(A);
+  case 0xc0: return flagSet!"i"(false);
+  case 0xc1: return callTable(12);
+  case 0xc2: return absoluteBitSet(6, true);
+  case 0xc3: return branchBit(6, true);
+  case 0xc4: return directWrite(A);
+  case 0xc5: return absoluteWrite(A);
+  case 0xc6: return indirectXWrite(A);
+  case 0xc7: return indexedIndirectWrite(A, X);
+  case 0xc8: return immediateRead!cmp(X);
+  case 0xc9: return absoluteWrite(X);
+  case 0xca: return absoluteBitModify(6);
+  case 0xcb: return directWrite(Y);
+  case 0xcc: return absoluteWrite(Y);
+  case 0xcd: return immediateRead!ld(X);
+  case 0xce: return pullOp(X);
+  case 0xcf: return multiply();
+  case 0xd0: return branch(P.z == 0);
+  case 0xd1: return callTable(13);
+  case 0xd2: return absoluteBitSet(6, false);
+  case 0xd3: return branchBit(6, false);
+  case 0xd4: return directIndexedWrite(A, X);
+  case 0xd5: return absoluteIndexedWrite(X);
+  case 0xd6: return absoluteIndexedWrite(A);
+  case 0xd7: return indirectIndexedWrite(A, Y);
+  case 0xd8: return directWrite(X);
+  case 0xd9: return directIndexedWrite(X, Y);
+  case 0xda: return directWriteWord();
+  case 0xdb: return directIndexedWrite(Y, X);
+  case 0xdc: return impliedModify!dec(Y);
+  case 0xdd: return transfer(Y, A);
+  case 0xde: return branchNotDirectIndexed(X);
+  case 0xdf: return decimalAdjustAdd();
+  case 0xe0: return overflowClear();
+  case 0xe1: return callTable(14);
+  case 0xe2: return absoluteBitSet(7, true);
+  case 0xe3: return branchBit(7, true);
+  case 0xe4: return directRead!ld(A);
+  case 0xe5: return absoluteRead!ld(A);
+  case 0xe6: return indirectXRead!ld;
+  case 0xe7: return indexedIndirectRead!ld(X);
+  case 0xe8: return immediateRead!ld(A);
+  case 0xe9: return absoluteRead!ld(X);
+  case 0xea: return absoluteBitModify(7);
+  case 0xeb: return directRead!ld(Y);
+  case 0xec: return absoluteRead!ld(Y);
+  case 0xed: return complementCarry();
+  case 0xee: return pullOp(Y);
+  case 0xef: return wait();
+  case 0xf0: return branch(P.z == 1);
+  case 0xf1: return callTable(15);
+  case 0xf2: return absoluteBitSet(7, false);
+  case 0xf3: return branchBit(7, false);
+  case 0xf4: return directIndexedRead!ld(A, X);
+  case 0xf5: return absoluteIndexedRead!ld(X);
+  case 0xf6: return absoluteIndexedRead!ld(Y);
+  case 0xf7: return indirectIndexedRead!ld(Y);
+  case 0xf8: return directRead!ld(X);
+  case 0xf9: return directIndexedRead!ld(X, Y);
+  case 0xfa: return directDirectWrite();
+  case 0xfb: return directIndexedRead!ld(Y, X);
+  case 0xfc: return impliedModify!inc(Y);
+  case 0xfd: return transfer(A, Y);
+  case 0xfe: return branchNotYDecrement();
+  case 0xff: return stop();
   }
 }
+
+pragma(inline, true):
+ref ubyte X() { return regs.x; }
+ref ubyte Y() { return YA.h; }
+ref ubyte A() { return YA.l; }
+ref ubyte S() { return regs.s; }
+ref Flags P() { return regs.p; }
+ref Reg16 PC() { return regs.pc; }
+ref Reg16 YA() { return regs.ya; }

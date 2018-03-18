@@ -3,6 +3,24 @@
  */
 module emulator.script;
 
+import util = emulator.util;
+
+/// Whether support for the Lua interpreter is available.
+enum enabled = util.featureEnabled!"Scripting";
+
+// Disabled
+// -----------------------------------------------------------------------------
+
+static if (!enabled) {
+  package void initialize() {}
+  package void terminate () {}
+}
+
+// Ennabled
+// -----------------------------------------------------------------------------
+
+static if (enabled):
+
 import std.array     : empty;
 import std.conv      : to;
 import std.exception : assumeUnique, enforce;
@@ -17,7 +35,7 @@ import console = emulator.console;
 import system  = emulator.system;
 
 // Core
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 private __gshared {
   lua_State* L;
@@ -29,17 +47,12 @@ enum tracebackIdx = 1;
 nothrow @nogc {
   string initFile() { return initFilePath; }
   void initFile(string path) {
-    assert(L is null);
+    assert(L is null, "Scripting has already initialized");
     initFilePath = path;
   }
 
   cstring getCString(int index) {
-    try {
-      return cast(cstring) L.lua_tostring(index);
-    }
-    catch (Exception e) {
-      assert(0, e.msg); // FIXME
-    }
+    return cast(cstring) L.lua_tostring(index);
   }
 
   string getString(int index) {
@@ -93,7 +106,9 @@ void initialize() {
 
   // Initialization scripts.
   load("script/core.lua");
-  if (!initFilePath.empty) initFilePath.load();
+  if (!initFilePath.empty) {
+    initFilePath.load();
+  }
 
   assert(L.lua_gettop == tracebackIdx);
 }
@@ -141,15 +156,10 @@ int panic(lua_State* L) {
 }
 
 int traceback(lua_State* L) {
-  try {
-    L.lua_getglobal("debug");
-    L.lua_getfield(-1, "traceback");
-    L.lua_pushvalue(1);
-    L.lua_pushinteger(2);
-    L.lua_call(2, 1);
-    return 1;
-  }
-  catch (Exception e) {
-    assert(0, e.msg); // FIXME
-  }
+  L.lua_getglobal("debug");
+  L.lua_getfield(-1, "traceback");
+  L.lua_pushvalue(1);
+  L.lua_pushinteger(2);
+  L.lua_call(2, 1);
+  return 1;
 }

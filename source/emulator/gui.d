@@ -1,92 +1,58 @@
+/**
+ * Integration of Dear IMGUI. Contains low-level GUI functions.
+ * See the gui.system module for high-level GUI functions.
+ *
+ * Invokes the high-level drawing code and handles submitting render commands to
+ * the GPU.
+ *
+ * References:
+ * - https://github.com/ocornut/imgui
+ * - https://github.com/ocornut/imgui/blob/master/imgui.h
+ * - https://github.com/ocornut/imgui/tree/master/examples/opengl3_example
+ */
 module emulator.gui;
 
-import std.algorithm.comparison : min;
-
+import std.algorithm : min;
 import std.bitmanip  : bitfields;
-import std.exception : assumeUnique;
+import std.exception : enforce;
+import std.file      : exists;
+import std.path      : buildPath;
+import std.string    : toStringz;
 
 import derelict.opengl;
-import derelict.sdl2.sdl;
+import derelict.glfw3.glfw3;
 
 import imgui;
 
+import emulator.profiler : Profile;
 import emulator.util;
-
 import console = emulator.console;
+import user    = emulator.user;
 import video   = emulator.video;
 
-import gui.icons;
+import gui.icons : ICON_MIN_FA, ICON_MAX_FA;
+import gui.fonts : Font, fonts;
 import guiSystem = gui.system;
 
-// IMGUI Interface
-// -------------------------------------------------------------------------------------------------
+debug = GuiTest;
 
-abstract class Window {
-  private Window next;
-
-  protected {
-    cstring title;
-    uint    windowFlags;
-    bool    open = true;
-  }
-
-  this(string title) {
-    this(title.toStringz);
-  }
-  this(cstring title) {
-    this.title = title;
-
-    if (root is null) {
-      root = this;
-    }
-    else {
-      auto parent = root;
-      while (parent.next !is null) parent = parent.next;
-      parent.next = this;
-    }
-  }
-
-  private void render() {
-    if (ImGui.Begin(title, &open, windowFlags)) draw();
-    ImGui.End();
-  }
-
-  protected void draw();
-}
-
-void tooltip(cstring desc) {
-  if (ImGui.IsItemHovered()) {
-    auto style = ImGui.GetStyle();
-    auto alpha = style.Alpha;
-    if (alpha < 1) style.Alpha = min(1, alpha * 3);
-
-    ImGui.BeginTooltip();
-    ImGui.PushTextWrapPos(450);
-    ImGui.TextUnformatted(desc);
-    ImGui.PopTextWrapPos();
-    ImGui.EndTooltip();
-
-    style.Alpha = alpha;
-  }
-}
-
-// IMGUI Core
-// -------------------------------------------------------------------------------------------------
+// Core
+// -----------------------------------------------------------------------------
 
 private __gshared {
-  ImGuiIO*    io;
-  ImDrawData* data;
+  string iniFilename; /// GC reference
+  double lastTime;    /// Used to measure delta time
+  ImGuiIO* io;        /// ImGui handle
+  GLuint alphaProgram, colorProgram; /// OpenGL GUI programs
+  GLuint vao, vbo, ibo, ubo, tex; /// OpenGL objects
+  Mouse mouse; /// Mouse state collected from input events
+  bool _enabled = true; // Whether to render gui or not
 
-  Window root;
-
-  double lastTime;
-
-  GLuint program, vao, vbo, ibo, tex;
-  GLuint projUniform, texUniform;
-
-  Mouse mouse;
-
-  bool enabled = true;
+  ubyte [Font.max + 1] fontSizes = [13, 16, 28, 14];
+  string[Font.max + 1] fontNames = [null,
+                                    "Futura.ttc",
+                                    "Tahoma Bold.ttf",
+                                    "SourceCodePro-Regular.ttf"];
 
   struct Mouse {
     byte wheel;
@@ -100,93 +66,187 @@ private __gshared {
   }
 }
 
+nothrow @nogc {
+  bool enabled() { return _enabled; }
+  void enabled(bool value) {
+    if (_enabled != value) {
+      _enabled = value;
+
+      if (value) {
+        lastTime = -1;
+        resetInput();
+      }
+    }
+  }
+}
+
+// Utilities
+// -----------------------------------------------------------------------------
+
+nothrow @nogc {
+  void filesLayout() { guiSystem.filesWindow.setActive(); }
+  void gameLayout () { guiSystem.gameWindow .setActive(); }
+
+  /// Display a tooltip if the last ImGui element is hovered.
+  void tooltip(string desc, uint textWrapPos = 450) {
+    if (ImGui.IsItemHovered()) {
+      auto style = ImGui.GetStyle();
+      auto alpha = style.Alpha;
+
+      if (alpha < 1) {
+        style.Alpha = min(1, alpha * 3);
+      }
+
+      ImGui.BeginTooltip();
+      ImGui.PushTextWrapPos(textWrapPos);
+      ImGui.TextUnformatted(desc.ptr, desc.ptr + desc.length);
+      ImGui.PopTextWrapPos();
+      ImGui.EndTooltip();
+
+      style.Alpha = alpha;
+    }
+  }
+}
+
+// Lifecycle
+// -----------------------------------------------------------------------------
+
+package:
+
+private uint setupProgram(uint prog) nothrow @nogc {
+  video.gl.program = prog;
+
+  glUniform1i(glGetUniformLocation(prog, "tex"), 0);
+  glUniformBlockBinding(prog, glGetUniformBlockIndex(prog, "GUI"), 0);
+  debug glCheck();
+
+  return prog;
+}
+
 void initialize() {
   console.trace("Initialize");
 
   io = &ImGui.GetIO();
 
-  io.KeyMap[ImGuiKey_Tab]        = SDLK_TAB;
-  io.KeyMap[ImGuiKey_LeftArrow]  = SDL_SCANCODE_LEFT;
-  io.KeyMap[ImGuiKey_RightArrow] = SDL_SCANCODE_RIGHT;
-  io.KeyMap[ImGuiKey_UpArrow]    = SDL_SCANCODE_UP;
-  io.KeyMap[ImGuiKey_DownArrow]  = SDL_SCANCODE_DOWN;
-  io.KeyMap[ImGuiKey_PageUp]     = SDL_SCANCODE_PAGEUP;
-  io.KeyMap[ImGuiKey_PageDown]   = SDL_SCANCODE_PAGEDOWN;
-  io.KeyMap[ImGuiKey_Home]       = SDL_SCANCODE_HOME;
-  io.KeyMap[ImGuiKey_End]        = SDL_SCANCODE_END;
-  io.KeyMap[ImGuiKey_Delete]     = SDLK_DELETE;
-  io.KeyMap[ImGuiKey_Backspace]  = SDLK_BACKSPACE;
-  io.KeyMap[ImGuiKey_Enter]      = SDLK_RETURN;
-  io.KeyMap[ImGuiKey_Escape]     = SDLK_ESCAPE;
-  io.KeyMap[ImGuiKey_A]          = SDLK_a;
-  io.KeyMap[ImGuiKey_C]          = SDLK_c;
-  io.KeyMap[ImGuiKey_V]          = SDLK_v;
-  io.KeyMap[ImGuiKey_X]          = SDLK_x;
-  io.KeyMap[ImGuiKey_Y]          = SDLK_y;
-  io.KeyMap[ImGuiKey_Z]          = SDLK_z;
+  iniFilename = user.dataPath ~ "/imgui.ini\0";
+  io.IniFilename = iniFilename.ptr;
 
-  io.GetClipboardTextFn = &GetClipboardText;
-  io.SetClipboardTextFn = &SetClipboardText;
-  io.RenderDrawListsFn  = &RenderDrawLists;
+  io.KeyMap[ImGuiKey_Tab]        = GLFW_KEY_TAB;
+  io.KeyMap[ImGuiKey_LeftArrow]  = GLFW_KEY_LEFT;
+  io.KeyMap[ImGuiKey_RightArrow] = GLFW_KEY_RIGHT;
+  io.KeyMap[ImGuiKey_UpArrow]    = GLFW_KEY_UP;
+  io.KeyMap[ImGuiKey_DownArrow]  = GLFW_KEY_DOWN;
+  io.KeyMap[ImGuiKey_PageUp]     = GLFW_KEY_PAGEUP;
+  io.KeyMap[ImGuiKey_PageDown]   = GLFW_KEY_PAGEDOWN;
+  io.KeyMap[ImGuiKey_Home]       = GLFW_KEY_HOME;
+  io.KeyMap[ImGuiKey_End]        = GLFW_KEY_END;
+  io.KeyMap[ImGuiKey_Delete]     = GLFW_KEY_DELETE;
+  io.KeyMap[ImGuiKey_Backspace]  = GLFW_KEY_BACKSPACE;
+  io.KeyMap[ImGuiKey_Enter]      = GLFW_KEY_ENTER;
+  io.KeyMap[ImGuiKey_Escape]     = GLFW_KEY_ESCAPE;
+  io.KeyMap[ImGuiKey_A]          = GLFW_KEY_A;
+  io.KeyMap[ImGuiKey_C]          = GLFW_KEY_C;
+  io.KeyMap[ImGuiKey_V]          = GLFW_KEY_V;
+  io.KeyMap[ImGuiKey_X]          = GLFW_KEY_X;
+  io.KeyMap[ImGuiKey_Y]          = GLFW_KEY_Y;
+  io.KeyMap[ImGuiKey_Z]          = GLFW_KEY_Z;
+
+  io.GetClipboardTextFn = &getClipboardText;
+  io.SetClipboardTextFn = &setClipboardText;
+  io.RenderDrawListsFn  = &renderDrawLists;
 
   version (Windows) {
-    SDL_SysWMinfo wmInfo = void;
-    SDL_VERSION(&wmInfo.version_);
-    SDL_GetWindowWMInfo(video.sdlWindow, &wmInfo).sdlCheck;
-    io.ImeWindowHandle = wmInfo.info.win.window;
+    io.ImeWindowHandle = video.nativeWindow;
   }
 
-  program = glCreateProgram();
-  auto vert = glCreateShader(GL_VERTEX_SHADER);
-  auto frag = glCreateShader(GL_FRAGMENT_SHADER);
-  glShaderSource(vert, 1, &vertexShader,   null);
-  glShaderSource(frag, 1, &fragmentShader, null);
-  glCompileShader(vert);
-  glCompileShader(frag);
-  checkShader(vert);
-  checkShader(frag);
-  glAttachShader(program, vert);
-  glAttachShader(program, frag);
-  glLinkProgram(program);
-  checkProgram(program);
-  glDeleteShader(vert);
-  glDeleteShader(frag);
-  debug glCheck();
+  auto vert = compileShader(GL_VERTEX_SHADER, vertexShader);
+  scope (exit) glDeleteShader(vert);
 
-  texUniform  = glGetUniformLocation(program, "tex");
-  projUniform = glGetUniformLocation(program, "proj");
-  auto pos = glGetAttribLocation(program, "in_pos");
-  auto uv  = glGetAttribLocation(program, "in_uv");
-  auto col = glGetAttribLocation(program, "in_col");
-  debug glCheck();
+  auto alphaSource = [fragmentShaderProlog, fragmentShaderAlpha];
+  auto alphaShader = compileShader(GL_FRAGMENT_SHADER, alphaSource);
+  scope (exit) glDeleteShader(alphaShader);
+
+  auto colorSource = [fragmentShaderProlog, fragmentShaderColor];
+  auto colorShader = compileShader(GL_FRAGMENT_SHADER, colorSource);
+  scope (exit) glDeleteShader(colorShader);
+
+  alphaProgram = linkProgram(vert, alphaShader).setupProgram();
+  colorProgram = linkProgram(vert, colorShader).setupProgram();
 
   glGenVertexArrays(1, &vao);
+  video.gl.vertexArray = vao;
+
   glBindVertexArray(vao);
   glGenBuffers(1, &vbo);
   glGenBuffers(1, &ibo);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glEnableVertexAttribArray(pos);
-  glEnableVertexAttribArray(uv);
-  glEnableVertexAttribArray(col);
-  glVertexAttribPointer(pos, 2, GL_FLOAT,         GL_FALSE, ImDrawVert.sizeof, cast(void*) ImDrawVert.pos.offsetof);
-  glVertexAttribPointer(uv,  2, GL_FLOAT,         GL_FALSE, ImDrawVert.sizeof, cast(void*) ImDrawVert.uv .offsetof);
-  glVertexAttribPointer(col, 4, GL_UNSIGNED_BYTE, GL_TRUE,  ImDrawVert.sizeof, cast(void*) ImDrawVert.col.offsetof);
-  glBindVertexArray(0);
+  video.gl.vertexBuffer = vbo;
+
+  glEnableVertexAttribArray(0);
+  glEnableVertexAttribArray(1);
+  glEnableVertexAttribArray(2);
+
+  enum size = ImDrawVert.sizeof;
+  auto posOffset = cast(void*) ImDrawVert.pos.offsetof;
+  auto uvOffset  = cast(void*) ImDrawVert.uv .offsetof;
+  auto colOffset = cast(void*) ImDrawVert.col.offsetof;
+  glVertexAttribPointer(0, 2, GL_FLOAT,         GL_FALSE, size, posOffset);
+  glVertexAttribPointer(1, 2, GL_FLOAT,         GL_FALSE, size, uvOffset);
+  glVertexAttribPointer(2, 4, GL_UNSIGNED_BYTE, GL_TRUE,  size, colOffset);
+
+  video.gl.vertexArray = 0;
   debug glCheck();
 
-  io.Fonts.AddFontDefault();
+  glGenBuffers(1, &ubo);
+  video.gl.uniformBuffer = ubo;
 
   ImFontConfig fc;
-  fc.MergeMode= true;
-  ImWchar[3] iconRanges = [ICON_MIN_FA, ICON_MAX_FA, 0];
-  io.Fonts.AddFontFromFileTTF("fonts/fontawesome-webfont.ttf", 13, &fc, iconRanges.ptr);
+  ImFont* f;
+
+  auto fontPaths = user.fontPaths;
+  foreach (uint idx, name; fontNames) {
+    fc.SizePixels = fontSizes[idx];
+
+    if (name.length == 0) {
+      assert(idx == 0);
+      f = io.Fonts.AddFontDefault(&fc);
+    }
+    else {
+      bool found;
+      foreach (p; fontPaths) {
+        auto tryPath = p.buildPath(name);
+        if (tryPath.exists()) {
+          f = io.Fonts.AddFontFromFileTTF(tryPath.toStringz(),
+                                          fc.SizePixels, &fc);
+          found = true;
+          break;
+        }
+      }
+
+      enforce(found, "Font not found: " ~ name);
+    }
+
+    // if (idx == Font.normal || idx == Font.heading) {
+      fc.MergeMode = true;
+
+      ImWchar[3] iconRanges = [ICON_MIN_FA, ICON_MAX_FA, 0];
+      io.Fonts.AddFontFromFileTTF("fonts/fontawesome-webfont.ttf",
+                                  fc.SizePixels, &fc, iconRanges.ptr);
+
+      // TODO: load Symbola ?
+
+      fc.MergeMode = false;
+    // }
+
+    fonts[idx] = f;
+  }
 
   ubyte* pixels = void;
   int width = void, height = void;
   io.Fonts.GetTexDataAsAlpha8(&pixels, &width, &height, null);
+  console.verbose("Font texture size: ", width, "x", height);
 
   glGenTextures(1, &tex);
-  glBindTexture(GL_TEXTURE_2D, tex);
+  video.gl.texture2D = tex;
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
   glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, width, height, 0, GL_RED, GL_UNSIGNED_BYTE, pixels);
@@ -195,215 +255,250 @@ void initialize() {
   io.Fonts.SetTexID(cast(void*) tex);
   io.Fonts.ClearInputData();
   io.Fonts.ClearTexData();
+
+  guiSystem.initialize();
 }
-
-void checkInfoLog(alias pname, alias get, alias getInfo)(GLuint name) {
-  GLint status;
-  get(name, pname, &status);
-
-  if (status == GL_FALSE) {
-    GLint length;
-    get(name, GL_INFO_LOG_LENGTH, &length);
-
-    auto err = new char[length];
-    getInfo(name, length, &length, err.ptr);
-
-    throw new Exception(err.assumeUnique);
-  }
-}
-
-alias checkShader  = checkInfoLog!(GL_COMPILE_STATUS, glGetShaderiv,  glGetShaderInfoLog);
-alias checkProgram = checkInfoLog!(GL_LINK_STATUS,    glGetProgramiv, glGetProgramInfoLog);
 
 void terminate() {
   console.trace("Terminate");
 
+  guiSystem.terminate();
+
   tex.disposeGL!glDeleteTextures;
+  ubo.disposeGL!glDeleteBuffers;
   ibo.disposeGL!glDeleteBuffers;
   vbo.disposeGL!glDeleteBuffers;
   vao.disposeGL!glDeleteVertexArrays;
 
-  program.dispose!glDeleteProgram;
+  alphaProgram.dispose!glDeleteProgram;
+  colorProgram.dispose!glDeleteProgram;
 
   ImGui.Shutdown();
 }
 
-bool processEvent(SDL_Event* event) {
-  if (!enabled) return false;
+private void setup() nothrow @nogc {
+  int ww = void, wh = void;
+  int dw = void, dh = void;
+  video.window.glfwGetWindowSize(&ww, &wh);
+  video.window.glfwGetFramebufferSize(&dw, &dh);
+  io.DisplaySize = ImVec2(ww, wh);
+  io.DisplayFramebufferScale = ImVec2(ww > 0 ? cast(float) dw / ww : 0,
+                                      wh > 0 ? cast(float) dh / wh : 0);
 
-  switch (event.type) {
-  default: return false;
+  auto time    = glfwGetTime();
+  io.DeltaTime = lastTime > 0 ? time - lastTime : 1f / 60;
+  lastTime     = time;
 
-  case SDL_MOUSEWHEEL:
-    /**/ if (event.wheel.y > 0) mouse.wheel =  1;
-    else if (event.wheel.y < 0) mouse.wheel = -1;
-    return true;
-
-  case SDL_MOUSEBUTTONDOWN:
-    switch (event.button.button) {
-    default: return false;
-    case SDL_BUTTON_LEFT:   mouse.left   = true; return true;
-    case SDL_BUTTON_RIGHT:  mouse.right  = true; return true;
-    case SDL_BUTTON_MIDDLE: mouse.middle = true; return true;
-    }
-
-  case SDL_TEXTINPUT:
-    io.AddInputCharactersUTF8(event.text.text.ptr);
-    return true;
-
-  case SDL_KEYDOWN:
-  case SDL_KEYUP:
-    auto key = event.key.keysym.sym & ~SDLK_SCANCODE_MASK;
-    auto mod = SDL_GetModState();
-    io.KeysDown[key] = event.type == SDL_KEYDOWN;
-    io.KeyShift = (mod & KMOD_SHIFT) != 0;
-    io.KeyAlt   = (mod & KMOD_CTRL)  != 0;
-    io.KeySuper = (mod & KMOD_GUI)   != 0;
-    return true;
+  if (!video.window.glfwGetWindowAttrib(GLFW_FOCUSED)) {
+    io.MousePos = ImVec2(-float.max, -float.max);
   }
+  else if (io.WantMoveMouse) {
+    video.window.glfwSetCursorPos(io.MousePos.x, io.MousePos.y);
+  }
+  else {
+    double mx = void, my = void;
+    video.window.glfwGetCursorPos(&mx, &my);
+    io.MousePos = ImVec2(mx, my);
+  }
+
+  io.MouseDown[0] = mouse.left   || video.window.glfwGetMouseButton(0);
+  io.MouseDown[1] = mouse.right  || video.window.glfwGetMouseButton(1);
+  io.MouseDown[2] = mouse.middle || video.window.glfwGetMouseButton(2);
+  io.MouseWheel   = mouse.wheel * 0.25;
+  resetInput();
+
+  auto cursorMode = io.MouseDrawCursor ? GLFW_CURSOR_HIDDEN : GLFW_CURSOR_NORMAL;
+  video.window.glfwSetInputMode(GLFW_CURSOR, cursorMode);
 }
 
 void run() {
   if (!enabled) return;
 
-  int ww = void, wh = void;
-  int dw = void, dh = void;
-  SDL_GetWindowSize(video.sdlWindow, &ww, &wh);
-  SDL_GL_GetDrawableSize(video.sdlWindow, &dw, &dh);
-  io.DisplaySize = ImVec2(ww, wh);
-  io.DisplayFramebufferScale = ImVec2(ww > 0 ? cast(float) dw / ww : 0,
-                                      wh > 0 ? cast(float) dh / dh : 0);
+  scope auto p = new Profile!();
 
-  auto time    = SDL_GetTicks() / cast(double) 1000;
-  io.DeltaTime = lastTime > 0 ? time - lastTime : 1f / 60;
-  lastTime     = time;
+  setup();
 
-  int mx = void, my = void;
-  auto mouseMask = SDL_GetMouseState(&mx, &my);
-  if (SDL_GetWindowFlags(video.sdlWindow) & SDL_WINDOW_MOUSE_FOCUS) {
-    io.MousePos = ImVec2(mx, my);
-  }
-  else {
-    io.MousePos = ImVec2(-float.max, -float.max);
+  {
+    scope auto p1 = new Profile!();
+    ImGui.NewFrame();
   }
 
-  io.MouseDown[0] = mouse.left   || (mouseMask & SDL_BUTTON(SDL_BUTTON_LEFT))   != 0;
-  io.MouseDown[1] = mouse.right  || (mouseMask & SDL_BUTTON(SDL_BUTTON_RIGHT))  != 0;
-  io.MouseDown[2] = mouse.middle || (mouseMask & SDL_BUTTON(SDL_BUTTON_MIDDLE)) != 0;
-  // io.MouseWheel = mouse.wheel * 0.25;
-
-  mouse.buttons = 0;
-  mouse.wheel   = 0;
-
-  SDL_ShowCursor(!io.MouseDrawCursor);
-
-  ImGui.NewFrame();
   guiSystem.draw();
 
-  // __gshared bool open;
-  // ImGui.ShowTestWindow(&open);
-
-  auto window = root;
-  while (window !is null) {
-    window.render();
-    window = window.next;
+  {
+    scope auto p1 = new Profile!();
+    ImGui.Render();
   }
-
-  ImGui.Render();
 }
 
-// IMGUI Shader
-// -------------------------------------------------------------------------------------------------
+// IMGUI Shaders
+// -----------------------------------------------------------------------------
+
+// This is a very simple shader used for all GUI draw calls. Except maybe
+// for custom draw logic implemented in some components.
+//
+// The vertex stage applies an orthographic projection to a 2D position while
+// the fragment stage combines the vertex color with a texture sample.
+//
+// The output is in RGBA and expects alpha blending after the pixel stage.
+//
+// TODO: sRGB?
 
 immutable vertexShader = q{
-  #version 330
+  #version 410
 
-  in vec2 in_pos;
-  in vec2 in_uv;
-  in vec4 in_col;
+  layout(location=0) in vec2 in_pos;
+  layout(location=1) in vec2 in_uv;
+  layout(location=2) in vec4 in_col;
 
   out vec2 uv;
   out vec4 col;
 
-  uniform mat4 proj;
+  layout (std140) uniform GUI {
+    mat4 proj;
+  } gui;
 
   void main() {
-    gl_Position = proj * vec4(in_pos, 0, 1);
+    gl_Position = gui.proj * vec4(in_pos, 0, 1);
 
     col = in_col;
     uv  = in_uv;
   }
-}.ptr;
+};
 
-immutable fragmentShader = q{
+immutable fragmentShaderProlog = q{
   #version 330
 
   in vec2 uv;
   in vec4 col;
 
-  out vec4 fragColor;
+  layout(location=0) out vec4 fragColor;
 
   uniform sampler2D tex;
+};
 
+immutable fragmentShaderAlpha = q{
   void main() {
+    // float color = texture(tex, uv).r;
+    // float width = fwidth(color);
+    // float alpha = smoothstep(0.5 - width, 0.5 + width, color);
+    // fragColor = vec4(col.rgb * color, col.a * alpha);
     fragColor = col * texture(tex, uv).r;
   }
-}.ptr;
+};
+
+immutable fragmentShaderColor = q{
+  void main() {
+    fragColor = col * texture(tex, uv);
+  }
+};
+
+// Input Handlers
+// -----------------------------------------------------------------------------
+
+// These functions are called from the emulator.input module in response to
+// user input events. They are used to communicate these events to IMGUI.
+
+nothrow @nogc:
+
+void resetInput() {
+  mouse.buttons = 0;
+  mouse.wheel   = 0;
+}
+
+void onKey(int key, int action) {
+  io.KeysDown[key] = action == GLFW_PRESS;
+  io.KeyAlt   = io.KeysDown[GLFW_KEY_LEFT_ALT] ||
+                io.KeysDown[GLFW_KEY_RIGHT_ALT];
+  io.KeyCtrl = io.KeysDown[GLFW_KEY_LEFT_CONTROL] ||
+               io.KeysDown[GLFW_KEY_RIGHT_CONTROL];
+  io.KeyShift = io.KeysDown[GLFW_KEY_LEFT_SHIFT] ||
+                io.KeysDown[GLFW_KEY_RIGHT_SHIFT];
+  io.KeySuper = io.KeysDown[GLFW_KEY_LEFT_SUPER] ||
+                io.KeysDown[GLFW_KEY_RIGHT_SUPER];
+}
+
+void onChar(uint codepoint) {
+  if (codepoint < 0x10000) {
+    io.AddInputCharacter(cast(ushort) codepoint);
+  }
+}
+
+void onMouseButton(int button, int action) {
+  auto press = action == GLFW_PRESS;
+  switch (button) {
+  case GLFW_MOUSE_BUTTON_LEFT:   mouse.left   = press; break;
+  case GLFW_MOUSE_BUTTON_RIGHT:  mouse.right  = press; break;
+  case GLFW_MOUSE_BUTTON_MIDDLE: mouse.middle = press; break;
+  default:
+  }
+}
+
+void onScroll(double offset) {
+  /**/ if (offset > 0) mouse.wheel += 1;
+  else if (offset < 0) mouse.wheel -= 1;
+}
 
 // IMGUI Callbacks
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
-extern (C++) nothrow:
+// These functions are called by IMGUI in response to certain events.
 
-const(char)* GetClipboardText(void* user_data) {
-  return SDL_GetClipboardText();
+extern (C++):
+
+/// Called when the user wants to paste text into an input box.
+const(char)* getClipboardText(void* userData) {
+  return video.window.glfwGetClipboardString();
 }
 
-void SetClipboardText(void* user_data, const(char)* text) {
-  SDL_SetClipboardText(text);
+/// Called when the user wants to copy or cut text from an input box.
+void setClipboardText(void* userData, const(char)* text) {
+  video.window.glfwSetClipboardString(text);
 }
 
-void RenderDrawLists(ImDrawData* drawData) {
-  data = drawData;
-  auto width = cast(GLsizei) io.DisplaySize.x;
-  auto height = cast(GLsizei) io.DisplaySize.y;
-  // auto width  = cast(GLsizei) (io.DisplaySize.x * io.DisplayFramebufferScale.x);
-  // auto heImGui.ht = cast(GLsizei) (io.DisplaySize.y * io.DisplayFramebufferScale.y);
-  // if (width == 0 || heImGui.ht == 0) return;
+/// IMGUI can be built with either 16- or 32-bit indices.
+enum indexType = ImDrawIdx.sizeof == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
 
-  // drawData.ImDataDraw_ScaleClipRects(io.DisplayFramebufferScale);
+/// Called from within ImGui.Render() to submit its draw lists to the GPU.
+void renderDrawLists(ImDrawData* drawData) {
+  auto width  = cast(GLsizei) (io.DisplaySize.x * io.DisplayFramebufferScale.x);
+  auto height = cast(GLsizei) (io.DisplaySize.y * io.DisplayFramebufferScale.y);
+  if (width == 0 || height == 0) return;
 
-  glEnable(GL_BLEND);
-  glBlendEquation(GL_FUNC_ADD);
-  glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-  glDisable(GL_CULL_FACE);
-  glDisable(GL_DEPTH_TEST);
-  glEnable(GL_SCISSOR_TEST);
-  glActiveTexture(GL_TEXTURE0);
-  glViewport(0, 0, width, height);
+  drawData.ScaleClipRects(io.DisplayFramebufferScale);
 
-  scope auto orthographic = [2f / io.DisplaySize.x, 0,                       0, 0,
-                              0,                    2f / -io.DisplaySize.y,  0, 0,
-                              0,                    0,                      -1, 0,
-                             -1,                    1,                       0, 1];
+  video.gl.blendEnable();
+  video.gl.scissorTestEnable();
+  video.gl.viewport(0, 0, width, height);
 
-  glUseProgram(program);
-  glUniform1i(texUniform, 0);
-  glUniformMatrix4fv(projUniform, 1, GL_FALSE, orthographic.ptr);
-  glBindVertexArray(vao);
-  glBindBuffer(GL_ARRAY_BUFFER, vbo);
-  glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ibo);
+  float[16] orthographic =
+    [2f / io.DisplaySize.x, 0,                       0, 0,
+      0,                    2f / -io.DisplaySize.y,  0, 0,
+      0,                    0,                      -1, 0,
+     -1,                    1,                       0, 1];
+
+
+  video.gl.vertexArray   = vao;
+  video.gl.vertexBuffer  = vbo;
+  video.gl.indexBuffer   = ibo;
+  video.gl.uniformBuffer = ubo;
+
+  enum mat4Size = orthographic.length * float.sizeof;
+  glBufferData(GL_UNIFORM_BUFFER, mat4Size, orthographic.ptr, GL_DYNAMIC_DRAW);
+  glBindBufferRange(GL_UNIFORM_BUFFER, 0, ubo, 0, mat4Size);
 
   foreach (n; 0 .. drawData.CmdListsCount) {
     auto cmdList = drawData.CmdLists[n];
 
     glBufferData(GL_ARRAY_BUFFER,
                  cmdList.VtxBuffer.Size * ImDrawVert.sizeof,
-                 cmdList.VtxBuffer.Data, GL_STREAM_DRAW);
+                 cmdList.VtxBuffer.Data,
+                 GL_STREAM_DRAW);
 
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,
                  cmdList.IdxBuffer.Size * ImDrawIdx.sizeof,
-                 cmdList.IdxBuffer.Data, GL_STREAM_DRAW);
+                 cmdList.IdxBuffer.Data,
+                 GL_STREAM_DRAW);
 
     ImDrawIdx* idxOffset;
     auto cmd = cmdList.CmdBuffer.Data;
@@ -413,13 +508,16 @@ void RenderDrawLists(ImDrawData* drawData) {
         cmd.UserCallback(cmdList, cmd);
       }
       else {
-        glBindTexture(GL_TEXTURE_2D, cast(GLuint) cmd.TextureId);
-        glScissor(cast(GLsizei) (cmd.ClipRect.x),
-                  cast(GLsizei) (height - cmd.ClipRect.w),
-                  cast(GLsizei) (cmd.ClipRect.z - cmd.ClipRect.x),
-                  cast(GLsizei) (cmd.ClipRect.w - cmd.ClipRect.y));
+        auto texture = cast(uint) cmd.TextureId;
+        video.gl.texture2D = texture;
 
-        enum indexType = ImDrawIdx.sizeof == 2 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_INT;
+        video.gl.program = texture == tex ? alphaProgram : colorProgram;
+
+        video.gl.scissor(cast(GLsizei) (cmd.ClipRect.x),
+                         cast(GLsizei) (height - cmd.ClipRect.w),
+                         cast(GLsizei) (cmd.ClipRect.z - cmd.ClipRect.x),
+                         cast(GLsizei) (cmd.ClipRect.w - cmd.ClipRect.y));
+
         glDrawElements(GL_TRIANGLES, cmd.ElemCount, indexType, idxOffset);
       }
 
@@ -427,6 +525,5 @@ void RenderDrawLists(ImDrawData* drawData) {
     }
   }
 
-  glDisable(GL_SCISSOR_TEST);
   debug glCheck();
 }

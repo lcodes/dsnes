@@ -31,11 +31,9 @@ import std.bitmanip : BitArray, bitfields;
 import std.string   : empty, indexOf;
 import std.traits   : isFunction, isSigned;
 
+import emulator.util : Reg8, Reg16, Reg24, bit;
 import system = emulator.system;
 import thread = emulator.thread;
-
-import emulator.util : bit;
-import emulator.types;
 
 import mem = snes.memory;
 import ppu = snes.ppu;
@@ -496,7 +494,7 @@ void run() {
     }
   }
 
-  thread.brk();
+  // thread.brk();
 
   auto op = fetch();
   debug (CPU_OPS) printf("cpu.run $%02x\n", op);
@@ -635,7 +633,7 @@ void writeIO(ushort addr, ubyte data) {
   }
 }
 
-private pragma(inline, true):
+private:
 
 bool intPending() { return status.intPending; }
 ubyte ioPortWrite() { return _io.wrio; }
@@ -948,7 +946,7 @@ void dmaTransfer(bool direction, ubyte bbus, uint abus) {
 ubyte dmaAddressB(uint n, uint channel) {
   assert(0, "TODO");
   // switch (channel[n].transferMode) {
-    
+
   // }
 }
 

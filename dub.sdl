@@ -4,23 +4,27 @@ authors     "Jeremie Pelletier <jeremiep+emulator@gmail.com>"
 copyright   "Copyright © 2017, Jeremie Pelletier"
 license     "TDB"
 
-dependency "dimgui"        version="~master"
-dependency "derelict-gl3"  version="~>2.0.0-beta.4"
-dependency "derelict-lua"  version="~>2.0.0-beta.2"
-dependency "derelict-sdl2" version="~>3.1.0-alpha.2"
-dependency "linenoise"     version="~>1.0.0"
+dependency "dimgui"         version="~master"
+dependency "derelict-al"    version="~>2.0.0-beta.2"
+dependency "derelict-fi"    version="~>3.0.0-beta.1"
+dependency "derelict-gl3"   version="~>2.0.0-beta.5"
+dependency "derelict-lua"   version="~>2.0.0-beta.2"
+dependency "derelict-glfw3" version="~>4.0.0-beta.1"
+# dependency "fontconfig"     version="~>1.1.0" platform="linux"
+dependency "linenoise"      version="~>1.0.0"
+# dependency "messagebox"     version="~master"
 
 targetPath "bin"
 
-libs "nfd" "linenoise"
+libs "linenoise" "nfd"
 
 lflags "-Llib"
 lflags "-framework" "Cocoa" platform="osx"
 
-buildType "debug" {
-  buildRequirements "allowWarnings"
-}
+# buildType "debug" {
+#   buildRequirements "allowWarnings"
+# }
 
-buildType "release" {
-  buildOptions "releaseMode" "optimize" "inline" "debugInfo" "noBoundsCheck"
-}
+# buildType "release" {
+#   buildOptions "releaseMode" "optimize" "inline" "debugInfo" "noBoundsCheck"
+# }

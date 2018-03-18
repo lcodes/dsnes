@@ -5,17 +5,20 @@ import std.traits : EnumMembers;
 
 import imgui;
 
-import emulator.util  : cstring;
-import emulator.gui : Window, tooltip;
+import emulator.util : cstring;
+import emulator.gui  : tooltip;
 import system = emulator.system;
 
 import disasm : disasm;
 import cpu = snes.cpu;
 
-immutable cstring[] pflagTips = ["Carry", "Zero", "IRQ Disable", "Decimal",
-                                 "Index register size (0 = 16-bit, 1 = 8-bit)",
-                                 "Accumulator register size (0 = 16-bit, 1 = 8-bit)",
-                                 "Overflow", "Negative"];
+import gui.layout : Window;
+
+immutable pflagTips =
+  ["Carry", "Zero", "IRQ Disable", "Decimal",
+   "Index register size (0 = 16-bit, 1 = 8-bit)",
+   "Accumulator register size (0 = 16-bit, 1 = 8-bit)",
+   "Overflow", "Negative"];
 
 class CpuWindow : Window {
   enum Reg {
@@ -99,10 +102,9 @@ class CpuWindow : Window {
     if (system.isPowered) {
       ImVec2 avail = ImGui.GetContentRegionAvail();
 
-      char[40] str = void;
+      char[43] str = void;
       uint addr = cpu.registers.pc;
 
-      version(none)
       foreach (n; 0..avail.y / ImGui.GetTextLineHeightWithSpacing() - 1) {
         auto ret = disasm(addr, str);
         str[ret.length] = '\0';

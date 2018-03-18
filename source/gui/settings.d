@@ -1,12 +1,18 @@
+/**
+ * Displays a window allowing the user to tweak application settings.
+ */
 module gui.settings;
 
 import imgui;
 
-import emulator.util : cstring;
+import emulator.util : Singleton, cstring;
 
-import console = emulator.console;
+import console  = emulator.console;
+import platform = emulator.platform;
 
-import gui.common;
+import gui.icons;
+import gui.fonts;
+import gui.layout : Window, isSingle;
 
 private __gshared {
   cstring[] tabs = ["General", "Input", "Video", "Audio", "Misc"];
@@ -14,53 +20,101 @@ private __gshared {
   uint tabWidth = 100;
 }
 
-package:
+/// Makes the settings window visible.
+void show(bool enable) {
+  assert(SettingsWindow.instance);
+  SettingsWindow.instance.show(enable);
+}
 
-__gshared bool show;
+/**
+ * A window used to change the application's settings.
+ *
+ * The settings are stored in the application data directory when the window is
+ * closed. They are instead reloaded if the user presses the cancel button.
+ *
+ * Settings are exposed through the console module. The window only generates
+ * a view over registered settings.
+ */
+class SettingsWindow : Singleton!(SettingsWindow, Window, cstring) {
+  this() {
+    super("Settings");
+    open = false;
+  }
 
-void draw() {
-  if (!show) return;
+protected:
+  override void preDraw() {
+    ImGui.PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2_zero);
+  }
 
-  auto windowMinSize = ImVec2(400, 300);
+  override void postDraw() {
+    ImGui.PopStyleVar(1);
+  }
 
-  ImGui.SetNextWindowFocus();
-  igSetNextWindowPosCenter();
-  ImGui.PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
-  ImGui.PushStyleVar(ImGuiStyleVar_WindowMinSize, windowMinSize);
-  ImGui.PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2_zero);
-
-  if (ImGui.Begin("Settings", &show, windowFlags)) {
-    // Tabs
-    ImGui.PushStyleVar(ImGuiStyleVar_ItemSpacing,  ImVec2_zero);
+  override void draw() {
+    pushFont(Font.large);
+    ImGui.PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2_zero);
     ImGui.BeginGroup();
+
+    drawTabs();
+
+    ImGui.EndGroup();
+    ImGui.PopStyleVar(1);
+    popFont();
+    ImGui.SameLine();
+    ImGui.BeginGroup();
+
+    drawContent();
+
+    ImGui.EndGroup();
+
+    drawCloseButton();
+  }
+
+  override bool showInWindowMenu() const { return false; }
+
+private:
+  void show(bool enable) {
+    open = enable;
+    setActive();
+  }
+
+  void drawTabs() {
     auto size = ImVec2(tabWidth, 40);
     foreach (uint i, tab; tabs) {
       auto flags = i == activeTab ? ImGuiButtonFlags_Disabled : 0;
       ImGui.PushStyleVar(ImGuiStyleVar_Alpha, i == activeTab ? .5 : 1);
-      if (ImGui.ButtonEx(tabs[i], size, flags)) activeTab = i;
+
+      if (ImGui.ButtonEx(tabs[i], size, flags)) {
+        activeTab = i;
+      }
+
       ImGui.PopStyleVar(1);
     }
-    ImGui.EndGroup();
-    ImGui.PopStyleVar(1);
+  }
 
-    // Content
-    ImGui.SameLine();
-    ImGui.BeginGroup();
+  void drawContent() {
     switch (activeTab) {
     case 0: ImGui.Text("a"); break;
     case 1: ImGui.Text("1"); break;
     case 2: ImGui.Text("2"); break;
     default: ImGui.Text("WUT");
     }
-    ImGui.EndGroup();
-
-    ImGui.End();
   }
 
-  ImGui.PopStyleVar(3);
+  void drawCloseButton() {
+    if (!isSingle) return;
+
+    auto size = ImVec2(28, 28);
+    auto pos = ImGui.GetIO().DisplaySize;
+    pos.x -= size.x;
+    pos.y = 0;
+
+    ImGui.SetCursorPos(pos);
+    pushFont(Font.large);
+    if (ImGui.Button(ICON_FA_TIMES, size)) {
+      open = false;
+      restoreActive();
+    }
+    popFont();
+  }
 }
-
-private:
-
-enum windowFlags = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize |
-  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoSavedSettings;

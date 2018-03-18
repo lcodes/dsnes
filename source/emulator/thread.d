@@ -15,7 +15,7 @@ import system  = emulator.system;
 debug {
   import core.stdc.stdio : printf;
 
-  // debug = Thread;
+  debug = Thread;
   // debug = Thread_Call;
   // debug = Thread_Sync;
 }
@@ -199,6 +199,7 @@ package void initialize() {
   breakpoint = new Semaphore();
 
   emulatorThread = new Thread(&entry);
+  emulatorThread.isDaemon = true;
   emulatorThread.start();
 }
 

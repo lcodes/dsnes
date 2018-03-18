@@ -15,7 +15,7 @@ import system = emulator.system;
 import thread = emulator.thread;
 import video  = emulator.video;
 
-import emulator.types;
+import emulator.util : Reg16;
 
 import cpu = snes.cpu;
 import mem = snes.memory;
@@ -232,7 +232,7 @@ nothrow @nogc {
 // -------------------------------------------------------------------------------------------------
 
 package mixin template Counter(alias scanline) {
-pragma(inline, true) nothrow @nogc:
+nothrow @nogc:
 
   void tick() {
     status.hcounter += 2; // Increment by smallest unit of time
@@ -820,7 +820,7 @@ struct OAM {
   ubyte read(ushort addr) {
     debug (PPU_OBJ) printf("ppu.obj.read $%04x\n", addr);
     if (addr & (1 << 9)) {
-      
+
     }
     else {
       auto n = addr >> 2; // object #
@@ -831,7 +831,7 @@ struct OAM {
       // case 2: return objects[n].character;
       default:
       }
-      // if (addr == 0) return 
+      // if (addr == 0) return
       // if (addr == 1)
     }
 
@@ -1500,7 +1500,7 @@ ubyte readIO(ushort addr, ubyte data) {
 
   case 0x2134:
     auto result = _io.m7a * cast(ubyte) (_io.m7b >> 8);
-    // return ppu1.mdr = result 
+    // return ppu1.mdr = result
     assert(0);
 
   case 0x2140:..

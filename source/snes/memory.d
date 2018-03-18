@@ -59,7 +59,7 @@ package void terminate() {
   ioMap.length = 0;
 }
 
-pragma(inline, true) nothrow @nogc:
+nothrow @nogc:
 
 union Page {
   ubyte* memory;
@@ -173,19 +173,19 @@ void mapHiROM(uint size) {
 }
 
 void mapExLoROM(uint size) {
-  
+
 }
 
 void mapExHiROM(uint size) {
-  
+
 }
 
 void mapSuperFX(uint size) {
-  
+
 }
 
 void mapSA1(uint size) {
-  
+
 }
 
 private:

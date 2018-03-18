@@ -73,17 +73,19 @@ union Features {
                    uint, "unused", 15));
 }
 
-string title() { assert(0); }
-Region region() { assert(0); }
-Type memoryMapType() { return type; }
-Features feats() { return features; }
+nothrow {
+  string title() { assert(0); }
+  Region region() { assert(0); }
+  Type memoryMapType() { return type; }
+  Features feats() { return features; }
+}
 
 const(ROMSpecifications)* romSpecifications() {
   return cast(ROMSpecifications*) &mem.rom[base];
 }
 
 void load(string path) {
-  console.verbose("Load ", path);
+  console.info("Load ", path);
 
   auto file = File(path, "r");
   auto size = file.size.to!uint;

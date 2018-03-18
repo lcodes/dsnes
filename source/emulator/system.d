@@ -1,48 +1,73 @@
 /**
- * Emulator application entry point.
+ * Emulator system. Binds the application together.
  */
 module emulator.system;
 
+import std = core.stdc.stdlib;
+
+import core.atomic : MemoryOrder, atomicLoad, atomicStore;
+import core.time   : MonoTime, dur;
+import core.thread : thread_isMainThread;
+
+import std.array     : empty, join, split;
 import std.exception : enforce;
+import std.path      : extension;
+import std.stdio     : stderr;
 import std.string    : toStringz;
 
-import derelict.sdl2.sdl;
+import derelict.glfw3.glfw3;
 
+// static import messagebox;
 import nfd;
 
-import emulator.util : sdlCheck, sdlRaise;
+import host = emulator.platform;
+import user = emulator.user;
+import util = emulator.util;
 
 import console = emulator.console;
-import script  = emulator.script;
-import thread  = emulator.thread;
+
+import script = emulator.script;
+import thread = emulator.thread;
+import worker = emulator.worker;
 
 import audio = emulator.audio;
 import imgui = emulator.gui;
 import input = emulator.input;
+import perfs = emulator.profiler : Profile;
 import video = emulator.video;
 
-import gui = gui.system;
+static assert(is(nfdchar_t == char), "Expecting NFD to use UTF-8 characters.");
 
 // State
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 private __gshared {
-  System[] systems;
-  System sys;
+  Settings _settings; /// Global application settings. User configurable.
 
-  string fileName;
-  uint quickSlot;
+  System[] systems; /// Emulated systems. Determines file support.
+  System _current;  /// Currently active system. Non-null when a file is loaded.
 
   Colorburst _colorburst;
+
+  string fileName; /// Path of the currently opened cartridge.
+
+  const(nfdchar_t)* openFilters; /// Generated file filters for the open dialog.
+  const(nfdchar_t)* openPath;    /// Last path used with the open dialog.
+}
+
+struct Settings {
+  bool   openLastFileOnStart = true;
+  ushort maxRecentFiles      = 10;
 }
 
 __gshared {
+  Exception lastException;
   bool hideAlerts;
 }
 
 nothrow @nogc {
   System current() {
-    return sys;
+    return _current;
   }
 
   string file() {
@@ -56,6 +81,15 @@ nothrow @nogc {
   Colorburst colorburst() {
     return _colorburst;
   }
+
+  bool isExtensionSupported(string ext) {
+    if (ext[0] == '.') {
+      ext = ext[1..$];
+    }
+
+    return ext in loader.systemsByFileExtension ||
+           ext in loader.unpacksByFileExtension;
+  }
 }
 
 enum Colorburst : double {
@@ -63,189 +97,160 @@ enum Colorburst : double {
   PAL  = 283.75 * 15_625.0 + 25.0
 }
 
-// Core
-// -------------------------------------------------------------------------------------------------
+/// Display a fatal error.
+void fatal(string message) {
+  stderr.writeln(message);
 
-alias isRunning = thread.isRunning;
-alias isPowered = thread.isPowered;
-alias quit      = thread.quit;
+  // messagebox.dialog(null, "Fatal Error", message,
+  //                   messagebox.Buttons.Ok | messagebox.Icon.Error);
+
+  std.exit(std.EXIT_FAILURE);
+}
 
 void fatal(Throwable e, bool rethrow = true) {
-  int result;
-
-  if (!hideAlerts) {
-    result = SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Error!",
-                                      e.msg.toStringz, video.sdlWindow);
-  }
-
   if (rethrow) {
-    result.sdlCheck;
+    console.fatal(e.msg);
     throw e;
+  }
+  else {
+    fatal(e.msg);
   }
 }
 
+// Lifecycle
+// -----------------------------------------------------------------------------
+
+alias isRunning = thread.isRunning;
+alias isPowered = thread.isPowered;
+
+/// Thrown to exit the application with a specific error code.
+class Quit : Exception {
+  const int exitCode;
+  this(int exitCode = 0) {
+    super(null);
+    this.exitCode = exitCode;
+  }
+}
+
+/// Stops the application. Throws a Quit exception if an exit code is given.
+void quit() {
+  thread.quit();
+  video .quit();
+}
+/// ditto
+void quit(int exitCode) {
+  quit();
+
+  throw new Quit(exitCode);
+}
+
+/// Main execution loop.
 void run() {
   initialize();
-  scope (exit)    terminate();
-  scope (failure) thread.quit();
+  scope (exit) terminate();
 
-  console.trace("DEMU Ready");
+  console.info("Ready");
 
-  if (file !is null) {
-    file.open();
-  }
+  firstFrame();
 
-  console.trace("Running DEMU");
+  console.trace("Running");
 
-  try while (thread.isRunning) {
-    event.run();
-    input.run();
-    audio.run();
-    video.run();
-    imgui.run();
-    video.end();
-    timer.run();
-  }
-  catch (Exception e) {
-    e.fatal();
+  while (thread.isRunning) {
+    try {
+      scope auto p = new Profile!();
+
+      perfs.run();
+      event.run();
+      audio.run();
+      video.run();
+      imgui.run();
+      video.end();
+      timer.end();
+      event.end();
+      perfs.end();
+    }
+    catch (Quit e) {
+      throw e;
+    }
+    catch (Exception e) {
+      lastException = e;
+      console.error(e);
+    }
   }
 }
 
 private:
 
-void initialize() {
-  assert(!DerelictSDL2.isLoaded);
-  assert(!thread.isRunning);
-  console.trace("Starting DEMU");
-
-  DerelictSDL2.load();
-
-  try {
-    if (SDL_Init(SDL_INIT_AUDIO | SDL_INIT_VIDEO) < 0) {
-      sdlRaise();
-    }
-
-    console.initialize();
-    script.initialize();
-    thread.initialize();
-
-    input.initialize();
-    audio.initialize();
-    video.initialize();
-    imgui.initialize();
-
-    gui.initialize();
-  }
-  catch (Exception e) {
-    e.fatal();
+/// Performs first-frame initialization.
+void firstFrame() {
+  if (file !is null) {
+    loader._open(file);
   }
 }
 
-void terminate() {
+/// Initializes all the application subsystems.
+void initialize() {
   assert(!thread.isRunning);
-  console.trace("Stopping DEMU");
 
-  if (!DerelictSDL2.isLoaded) return;
+  host.initialize();
+  user.initialize();
 
-  terminate!gui();
+  console.initialize();
 
+  script.initialize();
+  system.initialize();
+  thread.initialize();
+  worker.initialize();
+  loader.initialize();
+  recent.initialize();
+
+  audio.initialize();
+  video.initialize();
+  imgui.initialize();
+  input.initialize();
+  perfs.initialize();
+  state.initialize();
+}
+
+/// Terminates all the application subsystems.
+void terminate() {
+  quit();
+
+  assert(!thread.isRunning);
+  console.trace("Stopping");
+
+  terminate!state();
+  terminate!perfs();
+  terminate!input();
   terminate!imgui();
   terminate!video();
   terminate!audio();
-  terminate!input();
 
+  terminate!recent();
+  terminate!loader();
+  terminate!worker();
   terminate!thread();
+  terminate!system();
   terminate!script();
+
   terminate!console();
 
-  SDL_Quit();
-  DerelictSDL2.unload();
+  terminate!user();
+  terminate!host();
 }
 
+/// Terminates a single subsystem safely.
 void terminate(alias m)() {
   try m.terminate();
   catch (Exception e) e.fatal(false);
 }
 
-// Files
-// -------------------------------------------------------------------------------------------------
-
-public:
-
-void open() {
-  nfdchar_t* outPath;
-  switch (NFD_OpenDialog(null, null, &outPath)) {
-  case NFD_OKAY:
-    scope (exit) outPath.free();
-    outPath.to!string.open();
-    break;
-
-  case NFD_CANCEL: break;
-  default:         throw new Exception(NFD_GetError().to!string);
-  }
-}
-
-void open(string path) {
-  thread.power(false);
-
-  file = path;
-
-  try {
-   sys.load(path);
-   sys.power();
-
-   thread.power(true);
-  }
-  catch (Exception e) {
-    console.error(e.msg);
-    e.fatal(false);
-  }
-}
-
-uint numRecentFiles() {
-  return 0;
-}
-
-void openRecent(uint n) {
-  
-}
-
-void clearRecentFiles() {
-  
-}
-
-// Save States
-// -------------------------------------------------------------------------------------------------
-
-uint quickStateSlot() {
-  return quickSlot;
-}
-void quickStateSlot(uint index) {
-  enforce(index < 10);
-  quickSlot = index;
-}
-
-void quickSaveState() {
-  quickSlot.saveState();
-}
-void quickLoadState() {
-  quickSlot.loadState();
-}
-
-void saveState(uint slot) {
-  enforce(slot < 10);
-
-}
-
-void loadState(uint slot) {
-  enforce(slot < 10);
-
-}
-
-// Platforms
-// -------------------------------------------------------------------------------------------------
+// Emulated System
+// -----------------------------------------------------------------------------
 
 interface System {
+  alias .current current;
+
   static struct Information {
     string manufacturer;
     string name;
@@ -266,10 +271,16 @@ interface System {
     Device[] devices;
   }
 
-  string title();
-
   static struct VideoSize {
     uint width, height;
+  }
+
+  alias immutable string[] FileExts;
+
+  const nothrow {
+    string title();
+    FileExts supportedExtensions();
+    string loadRomInformation(string file);
   }
 
   VideoSize videoSize();
@@ -301,101 +312,363 @@ interface System {
   // uint videoColor(ushort r, ushort g, ushort b);
 
   final System register() {
-    sys = this; // TODO: remove
+    _current = this; // TODO: remove
     systems ~= this;
     return this;
   }
 }
 
 // Internals
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 package:
 
 void threadRun() {
-  sys.run();
+  _current.run();
 }
 
 private:
 
-struct event { @disable this();
-  static void run() {
-    SDL_Event event = void;
-    SDL_PollEvent(&event);
+/**
+ * Application system. Small wrapper over the GLFW library.
+ */
+struct system {
+  mixin util.noCtors!();
+  static:
 
-    imgui.processEvent(&event);
+  /// Loads the GLFW library and setup error its handling.
+  void initialize() {
+    assert(!DerelictGLFW3.isLoaded);
+    DerelictGLFW3.load();
 
-    switch (event.type) {
-    default: break;
-    case SDL_QUIT: thread.quit(); break;
+    glfwSetErrorCallback(&onGlfwError);
+    enforce(glfwInit(), "GLFW init failed");
 
-    case SDL_WINDOWEVENT:
-      switch (event.window.event) {
-      default: break;
+    int major = void, minor = void, patch = void;
+    glfwGetVersion(&major, &minor, &patch);
+    console.verbose("GLFW version ", major, ".", minor, ".", patch);
+  }
 
-      case SDL_WINDOWEVENT_SHOWN: break;
-      case SDL_WINDOWEVENT_HIDDEN: break;
-      case SDL_WINDOWEVENT_EXPOSED: break;
-      case SDL_WINDOWEVENT_MOVED:   video.onMove  (event.window.data1, event.window.data2); break;
-      case SDL_WINDOWEVENT_RESIZED: video.onResize(event.window.data1, event.window.data2); break;
-      case SDL_WINDOWEVENT_SIZE_CHANGED: break;
-      case SDL_WINDOWEVENT_MINIMIZED: break;
-      case SDL_WINDOWEVENT_MAXIMIZED: break;
-      case SDL_WINDOWEVENT_RESTORED: break;
-      case SDL_WINDOWEVENT_ENTER: break;
-      case SDL_WINDOWEVENT_LEAVE: break;
-      case SDL_WINDOWEVENT_FOCUS_GAINED: break;
-      case SDL_WINDOWEVENT_FOCUS_LOST: break;
-      case SDL_WINDOWEVENT_CLOSE: break;
-      case SDL_WINDOWEVENT_TAKE_FOCUS: break;
-      case SDL_WINDOWEVENT_HIT_TEST: break;
+  /// Unloads the GLFW library.
+  void terminate() {
+    if (!DerelictGLFW3.isLoaded) {
+      glfwTerminate();
+      DerelictGLFW3.unload();
+    }
+  }
+
+  /// Called by GLFW each time a GLFW error occur.
+  extern (C) void onGlfwError(int code, const(char)* msg) nothrow {
+    console.fatal("GLFW error #", code, ": ", msg);
+  }
+}
+
+/**
+ * Event subsystem. Mostly delegated to GLFW.
+ */
+struct event {
+  mixin util.noCtors!();
+  static:
+
+  __gshared {
+    bool wait = true; /// Whether to block waiting on events instead of polling.
+    byte tick;        /// Number of frames to run before waiting again.
+  }
+
+  shared {
+    bool waiting; /// Whether the main thread is blocked waiting for input.
+  }
+
+  /**
+   * Pumps events from the host windowing system. This triggers the registered
+   * GLFW callbacks. These callbacks are defined in the input and video modules.
+   */
+  void run() nothrow @nogc {
+    scope auto p = new Profile!();
+
+    if (wait) {
+      waiting.atomicStore!(MemoryOrder.raw)(true);
+
+      if (tick) {
+        glfwWaitEventsTimeout(cast(double) 1 / 120);
+        tick--;
       }
-      break;
+      else {
+        glfwWaitEvents();
+        tick += 30; // Run freely for a few frames. This allows effects to run.
+      }
 
-    case SDL_AUDIODEVICEADDED: break;
-    case SDL_AUDIODEVICEREMOVED: break;
+      waiting.atomicStore!(MemoryOrder.raw)(false);
+    }
+    else {
+      glfwPollEvents();
+    }
+  }
 
-    case SDL_CONTROLLERDEVICEADDED: break;
-    case SDL_CONTROLLERDEVICEREMOVED: break;
-    case SDL_CONTROLLERDEVICEREMAPPED: break;
+  // When the main window is being closed, the application should exit.
+  void end() {
+    scope auto p = new Profile!();
 
-    case SDL_KEYDOWN: break;
-    case SDL_KEYUP: break;
+    if (video.window.glfwWindowShouldClose()) {
+      quit(0);
+    }
+  }
 
-    case SDL_TEXTEDITING: break;
-    case SDL_TEXTINPUT:   break;
+  /// Sends an empty message to the main thread if blocked waiting on events.
+  public void wakeMainThread() {
+    assert(!thread_isMainThread());
 
-    case SDL_MOUSEMOTION: break;
-    case SDL_MOUSEBUTTONDOWN: break;
-    case SDL_MOUSEBUTTONUP: break;
-    case SDL_MOUSEWHEEL: break;
-
-    case SDL_JOYAXISMOTION: break;
-    case SDL_JOYBALLMOTION: break;
-    case SDL_JOYHATMOTION: break;
-
-    case SDL_CONTROLLERAXISMOTION: break;
-    case SDL_CONTROLLERBUTTONDOWN: break;
-    case SDL_CONTROLLERBUTTONUP: break;
-
-    case SDL_FINGERMOTION:
-    case SDL_FINGERDOWN:
-    case SDL_FINGERUP: break;
-
-    case SDL_MULTIGESTURE: break;
-    case SDL_DOLLARGESTURE: break;
-    case SDL_DOLLARRECORD: break;
-
-    case SDL_DROPFILE:
-    case SDL_DROPTEXT:
-    case SDL_DROPBEGIN:
-    case SDL_DROPCOMPLETE: break;
+    if (waiting.atomicLoad!(MemoryOrder.raw)()) {
+      glfwPostEmptyEvent();
     }
   }
 }
 
-struct timer { @disable this();
-  static void run() {
-    // SDL_Delay(10); // TODO: 
+/**
+ *
+ */
+struct timer {
+static:
+  mixin util.noCtors!();
+
+  void end() nothrow @nogc {
+    scope auto p = new Profile!();
+
+  }
+}
+
+/**
+ * Files loading. Handles I/O and compressions, delegates the rest to System.
+ */
+public struct loader {
+static private:
+  mixin util.noCtors!();
+
+  alias Unpack = void function(string);
+
+  static __gshared {
+    Unpack[string] unpacksByFileExtension; /// Supported file compressions.
+    System[string] systemsByFileExtension; /// Supported file formats.
+  }
+
+  /// Registers supported extensions.
+  void initialize() {
+    foreach (sys; systems) {
+      foreach (ext; sys.supportedExtensions) {
+        assert(ext !in systemsByFileExtension);
+        systemsByFileExtension[ext] = sys;
+      }
+    }
+
+    unpacksByFileExtension["gz"]     = &unpackGz;
+    unpacksByFileExtension["tar"]    = &unpackTar;
+    unpacksByFileExtension["tar.gz"] = &unpackTarGz;
+    unpacksByFileExtension["zip"]    = &unpackZip;
+  }
+
+  // Unregisters all supported extensions.
+  void terminate() {
+    unpacksByFileExtension = null;
+    systemsByFileExtension = null;
+  }
+
+  void unpackGz(string path) {
+    auto ext = path[0..$-3].extension;
+    enforce(ext, "Missing file extension before .gz");
+
+    setSystemFromExt(ext[1..$]);
+
+    // TODO:
+  }
+
+  void unpackTar(string path) {
+    assert(0);
+  }
+
+  void unpackTarGz(string path) {
+    assert(0);
+  }
+
+  void unpackZip(string path) {
+    assert(0);
+  }
+
+public:
+
+  void open() {
+    nfdchar_t* outPath;
+    switch (NFD_OpenDialog(openFilters, openPath, &outPath)) {
+    case NFD_CANCEL:
+      // Do nothing.
+      break;
+
+    case NFD_OKAY:
+      scope (exit) outPath.free();
+      open(outPath.to!string);
+      break;
+
+    default:
+      throw new Exception(NFD_GetError().to!string);
+    }
+  }
+
+  void _open(string path) {
+    thread.power(false);
+
+    auto ext = path.extension;
+    enforce(ext !is null, "Don't know how to open file: " ~ path);
+
+    file = path;
+    ext  = ext[1..$]; // Remove the period before the extension
+
+    if (auto open = ext in loader.unpacksByFileExtension) {
+      (*open)(path);
+    }
+    else {
+      setSystemFromExt(ext);
+      _current.load(path);
+    }
+
+    assert(_current);
+    _current.power();
+
+    recent.add(path);
+    imgui.gameLayout();
+
+    thread.power(true);
+  }
+
+  void open(string path) {
+    try {
+      _open(path);
+    }
+    catch (Exception e) {
+      lastException = e;
+      console.error(e.msg);
+    }
+  }
+
+  void setSystemFromExt(string ext) {
+    auto current = ext in loader.systemsByFileExtension;
+    enforce(current !is null, "Not a valid or supported ROM extension: " ~ ext);
+
+    _current = *current;
+  }
+}
+
+/**
+ * Handling of recently opened files.
+ */
+public struct recent {
+  mixin util.noCtors!();
+
+  private static __gshared {
+    string[] _files; /// List of recently opened files.
+    bool     _dirty; /// Whether the list has changed since it was loaded.
+  }
+
+  /// Name of the storage file containing line-separated recent files data.
+  enum storageFile = "recent-files.txt";
+
+  private alias initialize = load;
+  private alias terminate  = save;
+
+  /// Loads the recent file at the given index.
+  static void open(uint index) {
+    loader.open(_files[index]);
+  }
+
+  /// Loads the recent files list from storage.
+  static void load() {
+    _files = user.readTextLines(storageFile);
+    _dirty = false;
+  }
+
+  /// Saves the recent files list to storage.
+  static void save() {
+    if (_dirty) {
+      user.writeTextLines(storageFile, _files);
+
+      _dirty = false;
+    }
+  }
+
+  /// Adds a file to the recent list.
+  static void add(string path) {
+    _files ~= path;
+
+    if (_files.length > _settings.maxRecentFiles) {
+      _files.length = _settings.maxRecentFiles;
+    }
+
+    _dirty = true;
+  }
+
+  /// Clears the recent files list.
+  static void clear() {
+    if (!_files.empty) {
+      _files = null;
+      _dirty = true;
+    }
+  }
+
+  /// Returns the number of entries in the recent files list.
+  static uint length() {
+    return _files.length.to!uint;
+  }
+
+  /// Returns the list of recently opened files.
+  static string[] files() nothrow @nogc {
+    return _files;
+  }
+}
+
+/**
+ * Serialization of application state.
+ */
+public struct state {
+static:
+  mixin util.noCtors!();
+
+  enum autoSaveName = "auto.stsv";
+
+  private void initialize() {
+    // TODO: auto reload?
+  }
+
+  private void terminate() {
+    // TODO: auto store?
+  }
+
+  /// Currently active quick save/load slot.
+  private __gshared uint _quickSlot;
+  /// ditto
+  uint quickSlot() nothrow @nogc {
+    return _quickSlot;
+  }
+  /// ditto
+  void quickSlot(uint index) {
+    enforce(index < 10);
+    _quickSlot = index;
+  }
+
+  /// Indirectly stores the current state using quickSlot.
+  void quickSave() {
+    save(_quickSlot);
+  }
+  /// Indirectly restores the current state using quickSlot.
+  void quickLoad() {
+    load(_quickSlot);
+  }
+
+  /// Stores the current application state.
+  void save(uint slot) {
+    enforce(slot < 10);
+    // TODO:
+  }
+  /// Restores the current application state.
+  void load(uint slot) {
+    enforce(slot < 10);
+    // TODO:
   }
 }

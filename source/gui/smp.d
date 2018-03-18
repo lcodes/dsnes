@@ -2,7 +2,7 @@ module gui.smp;
 
 import imgui;
 
-import emulator.gui;
+import gui.layout : Window;
 
 class SmpWindow : Window {
   this() {
@@ -10,6 +10,6 @@ class SmpWindow : Window {
   }
 
   protected override void draw() {
-    
+
   }
 }

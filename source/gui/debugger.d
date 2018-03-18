@@ -2,12 +2,12 @@ module gui.debugger;
 
 import imgui;
 
-import emulator.gui;
-
 import thread = emulator.thread;
 
 import gui.icons;
 
+// TODO: toolbar
+version(none)
 class DebuggerWindow : Window {
   this() {
     super("Debugger".ptr);

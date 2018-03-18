@@ -1,8 +1,11 @@
+/**
+ * Displays the output of the emulated system in a window.
+ */
 module gui.game;
 
 import imgui;
 
-import emulator.gui : Window;
+import gui.layout : Window;
 
 class GameWindow : Window {
   this() {

@@ -8,12 +8,12 @@ import core.stdc.stdio : sscanf;
 
 import imgui;
 
-import emulator.gui : Window;
+import gui.layout : Window;
 
 class MemoryWindow : Window {
   private {
-    R read;
-    W write;
+    // R read;
+    // W write;
     uint size;
     uint rows = 16;
     uint baseDisplayAddr = 0;
@@ -22,15 +22,11 @@ class MemoryWindow : Window {
     bool allowEdits;
   }
 
-  alias R = ubyte function(uint addr);
-  alias W = void function(uint addr, ubyte data);
+  // alias R = ubyte function(uint addr);
+  // alias W = void function(uint addr, ubyte data);
 
-  this(uint size, R read, W write) {
+  this() {
     super("Memory".ptr);
-
-    this.size = size;
-    this.read = read;
-    this.write = write;
   }
 
   bool a = true;
@@ -86,7 +82,8 @@ class MemoryWindow : Window {
           // TODO
         }
         else {
-          ImGui.Text("%02X ", read(addr));
+          auto x = 0; //read(addr);
+          ImGui.Text("%02X ", x);
           if (allowEdits && ImGui.IsItemHovered() && ImGui.IsMouseClicked(0)) {
             // dataEditingTakeFocus = true;
             dataEditingAddr = addr;
@@ -109,7 +106,8 @@ class MemoryWindow : Window {
       addr = line * rows;
       for (auto n = 0; n < rows && addr < size; n++, addr++) {
         if (n > 0) ImGui.SameLine();
-        auto c = cast(char) read(addr);
+        // auto c = cast(char) read(addr);
+        auto c = '.';
         ImGui.Text("%c", c >= 32 && c < 128 ? c : '.');
       }
     }

@@ -2,7 +2,7 @@ module gui.breakpoints;
 
 import imgui;
 
-import emulator.gui : Window;
+import gui.layout : Window;
 
 class BreakpointsWindow : Window {
   this() {
@@ -10,6 +10,6 @@ class BreakpointsWindow : Window {
   }
 
   protected override void draw() {
-    
+
   }
 }

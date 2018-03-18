@@ -2,10 +2,12 @@ module gui.registers;
 
 import imgui;
 
-import emulator.gui;
+import emulator.gui : tooltip;
 
 import cpu = snes.cpu;
 import ppu = snes.ppu;
+
+import gui.layout : Window;
 
 class RegistersWindow : Window {
   this() {

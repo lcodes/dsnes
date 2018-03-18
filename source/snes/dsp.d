@@ -14,6 +14,7 @@ private __gshared {
   State state;
   Voice[8] voice;
 
+  // GlobalRegister
   enum : ubyte {
     MVOLL = 0x0c, MVOLD = 0x1c,
     EVOLL = 0x2c, EVOLR = 0x3c,
@@ -25,6 +26,7 @@ private __gshared {
     EDL   = 0x7d, FIR   = 0x0f  // 8 coefficients at 0x0f, 0x1f, ... 0x7f
   }
 
+  // VoiceRegister
   enum : ubyte {
     VOLL   = 0x00, VOLR   = 0x01,
     PITCHL = 0x02, PITCHH = 0x03,
@@ -33,6 +35,7 @@ private __gshared {
     ENVX   = 0x08, OUTX   = 0x09
   }
 
+  // EnvelopeMode
   enum : ubyte {
     EnvelopeRelease,
     EnvelopeAttack,
@@ -46,10 +49,7 @@ private __gshared {
   }
 
   struct State {
-    union {
-      ubyte[128] uregs;
-       byte[128] sregs;
-    }
+    ubyte[128] uregs;
 
     int[8][2] echoHistory; // Echo history keeps the most recent 8 stereo samples.
     mixin(bitfields!(int,  "echoHistoryOffset", 3,
@@ -116,7 +116,7 @@ private __gshared {
 }
 
 // Core
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 nothrow @nogc {
   thread.Processor processor() { return proc; }
@@ -320,7 +320,7 @@ void run() {
 ref auto reg(ref Voice v, int n) { return state.uregs[v.vidx + n]; }
 
 // Gaussian
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 immutable short[512] gaussianTable = [
      0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,    0,
@@ -374,7 +374,7 @@ int gaussianInterpolate(ref const Voice v) {
 }
 
 // Counter
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 // counter_rate = number of samples per counter event
 // all rates are evenly divisible by counter_range (0x7800, 30720, or 2048 * 5 * 3)
@@ -423,7 +423,7 @@ bool counterPoll(uint rate) {
 }
 
 // Envelope
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 void envelopeRun(ref Voice v) {
   auto envelope = v.envelope;
@@ -490,7 +490,7 @@ void envelopeRun(ref Voice v) {
 }
 
 // BRR
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 void brrDecode(ref Voice v) {
   // state._brrByte = smp.apuram[v.brrAddress + v.brrOffset] cached from previous clock cycle
@@ -555,7 +555,7 @@ void brrDecode(ref Voice v) {
 }
 
 // Misc.
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 void misc27() {
   state._pmon = state.uregs[PMON] & ~1; // Voice 0 doesn't support PMON.
@@ -590,11 +590,11 @@ void misc30() {
 }
 
 // Voice
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 void voiceOutput(ref Voice v, bool ch) {
   // Apply left/right volume.
-  auto amp = (state._output * state.sregs[VOLL + ch]) >> 7;
+  auto amp = (state._output * cast(byte)state.uregs[VOLL + ch]) >> 7;
 
   // Add to output total.
   state._mainOut[ch] += amp;
@@ -747,16 +747,16 @@ void voice9(ref Voice v) {
 }
 
 // Echo
-// -------------------------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 int calculateFIR(bool ch, int index) {
   auto sample = state.echoHistory[ch][(state.echoHistoryOffset + index + 1).bits!3];
-  return (sample * state.sregs[FIR + index * 0x10]) >> 6;
+  return (sample * cast(byte)state.uregs[FIR + index * 0x10]) >> 6;
 }
 
 int echoOutput(bool ch) {
-  return (cast(short) ((state._mainOut[ch] * state.sregs[MVOLL + ch * 0x10]) >> 7) +
-          cast(short) ((state._echoIn [ch] * state.sregs[EVOLL + ch * 0x10]) >> 7)).sclamp!16;
+  return (cast(short) ((state._mainOut[ch] * cast(byte)state.uregs[MVOLL + ch * 0x10]) >> 7) +
+          cast(short) ((state._echoIn [ch] * cast(byte)state.uregs[EVOLL + ch * 0x10]) >> 7)).sclamp!16;
 }
 
 void echoRead(bool ch) {
@@ -809,8 +809,8 @@ void echo26() {
   state._mainOut[0] = echoOutput(0);
 
   // Echo feedback.
-  auto l = state._echoOut[0] + cast(short) ((state._echoIn[0] * state.sregs[EFB]) >> 7);
-  auto r = state._echoOut[1] + cast(short) ((state._echoIn[1] * state.sregs[EFB]) >> 7);
+  auto l = state._echoOut[0] + cast(short) ((state._echoIn[0] * cast(byte)state.uregs[EFB]) >> 7);
+  auto r = state._echoOut[1] + cast(short) ((state._echoIn[1] * cast(byte)state.uregs[EFB]) >> 7);
 
   state._echoOut[0] = l.sclamp!16 & ~1;
   state._echoOut[1] = r.sclamp!16 & ~1;

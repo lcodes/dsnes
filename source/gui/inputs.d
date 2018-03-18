@@ -2,14 +2,14 @@ module gui.inputs;
 
 import imgui;
 
-import gui = emulator.gui;
+import gui.layout : Window;
 
-class InputsWindow : gui.Window {
+class InputsWindow : Window {
   this() {
     super("Inputs".ptr);
   }
 
   protected override void draw() {
-    
+
   }
 }

@@ -1,11 +1,17 @@
 {
 	"fileVersion": 1,
 	"versions": {
-		"derelict-gl3": "2.0.0-beta.4",
+		"archive": "0.6.0",
+		"derelict-al": "2.0.0-beta.2",
+		"derelict-fi": "3.0.0-beta.1",
+		"derelict-gl3": "2.0.0-beta.5",
+		"derelict-glfw3": "4.0.0-beta.1",
 		"derelict-lua": "2.0.0-beta.2",
 		"derelict-sdl2": "3.1.0-alpha.2",
 		"derelict-util": "3.0.0-beta.2",
 		"dimgui": "~master",
-		"linenoise": "1.0.0"
+		"io": "0.0.8",
+		"linenoise": "1.0.0",
+		"messagebox": "~master"
 	}
 }

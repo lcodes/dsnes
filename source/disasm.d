@@ -161,27 +161,9 @@ struct Instruction {
                    ubyte, "cycles", 4));
 }
 
-// Instruction op(uint address) {
-//   auto op = mem.read(address);
-
-//   switch (op) with(AddressingMode) with (Mnemonic) {
-//   // Add With Carry
-//   case 61: break;
-//   case 63: break;
-//   case 65: break;
-//   case 67: break;
-//   // case 
-//   default: assert(0);
-//   }
-// }
-
-// Instruction decode(uint address, ubyte op, Mnemonic mnemonic, AddressingMode mode, ubyte bytes) {
-  
-// }
-
 /**
  * String Format:
- *   "$BB:AAAA    MMM OOOOOOOOOO    CC CC CC "
+ *   "$BB:AAAA    MMM OOOOOOOOOO    CC CC CC CC "
  *
  *   B: Bank
  *   A: Address
@@ -195,7 +177,7 @@ char[] disasm(ref uint addr, char[] text) {
     mnemonic = 12,
     operands = 16,
     code = 30,
-    end = 39
+    end = 42
   }
 
   assert(text.length >= Offset.end);
@@ -898,16 +880,17 @@ char[] disasm(ref uint addr, char[] text) {
     pbuf += 1;
   }
 
-  foreach (n; s..3) {
+  foreach (n; s..4) {
     pbuf[0 .. 3] = ' ';
     pbuf += 3;
   }
 
-  assert(pbuf is text.ptr + Offset.end);
+  auto result = text[0..Offset.end];
+  assert(pbuf is text.ptr + Offset.end, result);
 
   addr += s;
 
-  return text[0..Offset.end];
+  return result;
 }
 
 uint read16(uint addr) {

@@ -35,7 +35,16 @@ final class SNES : emulator.System {
   }
 
 override:
-  string title() { return pak.title; }
+  string title() const nothrow { return pak.title; }
+
+  FileExts supportedExtensions() const nothrow {
+    immutable exts = ["fig", "sfc", "smc", "swc"];
+    return exts;
+  }
+
+  string loadRomInformation(string file) const nothrow {
+    assert(0);
+  }
 
   VideoSize videoSize() { return VideoSize(512, 480); }
   VideoSize videoSize(uint width, uint height, bool arc) {
@@ -86,17 +95,17 @@ override:
   }
 
   void rtcSync() {
-    
+    // TODO
   }
 }
 
 struct Color {
   uint _; alias _ this;
   // mixin(bitfields!(ubyte, "r", 4,
-  //                  ubyte, "unused1", 
+  //                  ubyte, "unused1",
   //                  ubyte, "g", 4,
   //                  ubyte, "b", 4,
   //                  ubyte, "l", 4));
 }
 
-// static assert(Color.sizeof == uint.sizeof);
+static assert(Color.sizeof == uint.sizeof);
